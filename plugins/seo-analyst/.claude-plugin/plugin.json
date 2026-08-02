@@ -1,0 +1,5 @@
+{
+  "name": "seo-analyst",
+  "version": "0.1.0",
+  "description": "SEO / web-analytics analyst persona: reads live Google Analytics 4 + Search Console data and reports insights. Opt-in — reference it from an agent's config plugins."
+}
