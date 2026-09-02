@@ -34,6 +34,13 @@ export type AgentCapabilities = {
   allowedTools: string[];
   /** Operator-supplied instructions appended to the agent's system prompt. */
   instructions?: string;
+  /**
+   * Optional "coding agent" mode: give the agent real filesystem + shell access
+   * (Read/Write/Edit/Bash/Grep/Glob → git, gh, builds) in `workdir`, but ONLY for
+   * events triggered by a BasicOps user id in `allowUsers`. Everyone else gets the
+   * normal sealed agent. Omit entirely to keep the agent fully sealed.
+   */
+  coding?: { workdir: string; allowUsers: number[] };
 };
 
 const EMPTY: AgentCapabilities = { mcpServers: {}, plugins: [], allowedTools: [] };
@@ -122,5 +129,11 @@ export function loadCapabilities(agent: string): AgentCapabilities {
   const instructions =
     typeof parsed.instructions === "string" && parsed.instructions.trim() ? parsed.instructions.trim() : undefined;
 
-  return { mcpServers, plugins, allowedTools, instructions };
+  let coding: AgentCapabilities["coding"];
+  if (parsed.coding && typeof parsed.coding.workdir === "string" && Array.isArray(parsed.coding.allowUsers)) {
+    const allowUsers = parsed.coding.allowUsers.map(Number).filter((n: number) => Number.isFinite(n));
+    if (allowUsers.length) coding = { workdir: parsed.coding.workdir, allowUsers };
+  }
+
+  return { mcpServers, plugins, allowedTools, instructions, coding };
 }

@@ -92,7 +92,7 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
   // instructions instead of guessing) + one entry per extra MCP server + `Skill`
   // when plugins load + any explicit extras. disallowedTools still blocks
   // destructive ops; the agent has no filesystem/shell access.
-  const allowedTools = [
+  const baseAllowedTools = [
     "mcp__basicops",
     "WebSearch",
     "WebFetch",
@@ -100,6 +100,10 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
     ...(caps.plugins.length ? ["Skill"] : []),
     ...caps.allowedTools,
   ];
+
+  // Coding-mode tools (filesystem + shell → git, gh, builds). Only added for
+  // events from an allowlisted user (see caps.coding), never for anyone else.
+  const CODING_TOOLS = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS", "TodoWrite", "NotebookEdit"];
 
   // System prompt = the Agent doc, plus any operator instructions from the config.
   const systemPrompt = caps.instructions
@@ -139,6 +143,17 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
     const resume = sessions.get(ev.convId);
     const payload = JSON.stringify({ context: ev.context, request: ev.request });
 
+    // Coding mode: ONLY when this event was triggered by an allowlisted user.
+    // Fail closed — no userId, or not on the list, means the normal sealed agent.
+    const coder =
+      caps.coding && ev.userId != null && caps.coding.allowUsers.includes(Number(ev.userId)) ? caps.coding : undefined;
+    if (coder) console.log(`  [coding] enabled for user ${ev.userId} in ${coder.workdir}`);
+
+    const allowedTools = coder ? [...baseAllowedTools, ...CODING_TOOLS] : baseAllowedTools;
+    const turnSystemPrompt = coder
+      ? `${systemPrompt}\n\n## Coding mode (trusted operator)\nYou have full filesystem + shell access in the working directory \`${coder.workdir}\` on this server. Do the engineering work requested — read/edit files, run commands, use git (pull, branch, commit, push) and gh, build, and test — with your tools. Complete the work before replying; then make your HTML reply a concise summary of what you did (files changed, commands run, results, branch/PR links).`
+      : systemPrompt;
+
     const response = query({
       prompt:
         "You received a BasicOps webhook event. Handle it and produce your reply. " +
@@ -150,8 +165,9 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
         plugins: caps.plugins,
         allowedTools,
         disallowedTools: BLOCKED_TOOLS,
-        systemPrompt,
-        maxTurns: 14,
+        systemPrompt: turnSystemPrompt,
+        maxTurns: coder ? 60 : 14,
+        ...(coder ? { cwd: coder.workdir, permissionMode: "bypassPermissions" as const } : {}),
         stderr: (d: string) => {
           const line = d.trim();
           if (line) console.error(`  [claude stderr] ${line}`);
