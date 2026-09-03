@@ -380,7 +380,15 @@ async function main() {
 
   // 2. Bind the listener first (so the Funnel has something to proxy to).
   c.step("Starting listener");
-  const boundPort = await startListener({ mcpUrl, apiKey, agentUserId, port, capabilities, configPath: configPath(agent) });
+  const boundPort = await startListener({
+    mcpUrl,
+    apiKey,
+    agentUserId,
+    port,
+    capabilities,
+    configPath: configPath(agent),
+    getCoding: () => loadCapabilities(agent).coding, // re-read so attach_project hot-applies
+  });
   c.ok(`Listener is up on port ${boundPort}`);
 
   // 3. Public URL — Tailscale Funnel at this agent's path (unless one was provided).

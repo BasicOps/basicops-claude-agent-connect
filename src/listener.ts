@@ -11,6 +11,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentCapabilities } from "./config.js";
 import { AGENT_SYSTEM_PROMPT } from "./prompt.js";
 import { BasicOpsClient } from "./basicops.js";
+import { selfConfigServer } from "./selfconfig.js";
 
 export type ListenerConfig = {
   mcpUrl: string;
@@ -21,6 +22,8 @@ export type ListenerConfig = {
   capabilities?: AgentCapabilities;
   /** Path to this agent's config file (cited when guiding the user to attach a project). */
   configPath?: string;
+  /** Re-read the coding config each event, so attach_project changes apply without a restart. */
+  getCoding?: () => AgentCapabilities["coding"];
 };
 
 // Destructive tools the agent must never call (blocked even though the whole
@@ -115,6 +118,10 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
   // Stateless client the listener uses to POST the agent's returned HTML.
   const client = new BasicOpsClient(cfg.mcpUrl, cfg.apiKey);
 
+  // In-process tool that lets an allowlisted operator attach a project to a
+  // folder by asking (writes only the project→folder mapping in the config).
+  const selfCfg = cfg.configPath ? selfConfigServer(cfg.configPath) : undefined;
+
   // Post `html` to the surface identified by the event context. Prefer replying
   // to the triggering message; otherwise use the surface-specific tool.
   async function postToSurface(ctx: Record<string, any>, html: string): Promise<string | undefined> {
@@ -147,33 +154,38 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
 
     // Coding mode: ONLY when this event was triggered by an allowlisted user.
     // Fail closed — no userId, or not on the list, means the normal sealed agent.
-    // The working directory is the one mapped to this event's BasicOps project
-    // (project "attached" to a folder), falling back to the default workdir.
-    const allowlisted = !!caps.coding && ev.userId != null && caps.coding.allowUsers.includes(Number(ev.userId));
+    // Re-read the coding config each event so attach_project changes hot-apply.
+    const coding = cfg.getCoding ? cfg.getCoding() : caps.coding;
+    const allowlisted = !!coding && ev.userId != null && coding.allowUsers.includes(Number(ev.userId));
     let workdir: string | undefined;
-    if (allowlisted && caps.coding) {
+    if (allowlisted && coding) {
       const pid = ev.context.projectId != null ? String(ev.context.projectId) : undefined;
-      workdir = (pid && caps.coding.projects?.[pid]) || caps.coding.workdir;
+      workdir = (pid && coding.projects?.[pid]) || coding.workdir;
     }
     const coder = allowlisted && workdir ? { workdir } : undefined;
     if (coder) console.log(`  [coding] enabled for user ${ev.userId} in ${coder.workdir}`);
     else if (allowlisted) console.log(`  [coding] user allowed but no directory mapped for project ${ev.context.projectId ?? "(none)"}`);
 
-    const allowedTools = coder ? [...baseAllowedTools, ...CODING_TOOLS] : baseAllowedTools;
+    // Allowlisted operators can self-attach projects via the in-process tool.
+    const canSelfConfig = allowlisted && !!selfCfg;
+    const turnMcpServers = canSelfConfig ? { ...mcpServers, selfconfig: selfCfg } : mcpServers;
+    const allowedTools = [
+      ...(coder ? [...baseAllowedTools, ...CODING_TOOLS] : baseAllowedTools),
+      ...(canSelfConfig ? ["mcp__selfconfig"] : []),
+    ];
+
     let turnSystemPrompt = systemPrompt;
     if (coder) {
-      turnSystemPrompt = `${systemPrompt}\n\n## Coding mode (trusted operator)\nYou have full filesystem + shell access in the working directory \`${coder.workdir}\` on this server. Do the engineering work requested — read/edit files, run commands, use git (pull, branch, commit, push) and gh, build, and test — with your tools. Complete the work before replying; then make your HTML reply a concise summary of what you did (files changed, commands run, results, branch/PR links).`;
+      turnSystemPrompt = `${systemPrompt}\n\n## Coding mode (trusted operator)\nYou have full filesystem + shell access in the working directory \`${coder.workdir}\` on this server. Do the engineering work requested — read/edit files, run commands, use git (pull, branch, commit, push) and gh, build, and test — with your tools. Complete the work before replying; then make your HTML reply a concise summary of what you did (files changed, commands run, results, branch/PR links).\n\nYou can also attach ANOTHER BasicOps project to a folder for the operator with the \`attach_project\` tool.`;
     } else if (allowlisted && ev.context.projectId != null) {
-      // Allowlisted operator, but this project isn't attached to a folder yet.
-      const cfgPath = cfg.configPath ?? "~/.config/basicops-agent/<agent>.json";
+      // Allowlisted operator, but this project isn't attached to a folder yet —
+      // and you CAN attach it yourself with attach_project.
       turnSystemPrompt =
         `${systemPrompt}\n\n## This project isn't attached to a folder yet\n` +
-        `You have NO filesystem/shell access here, because this BasicOps project (id ${ev.context.projectId}) ` +
-        `is not mapped to a local directory on the server. If the request needs engineering work (editing/running/building code, git), ` +
-        `do NOT attempt it — instead explain that the project must be attached to a folder first, and give these exact steps:\n` +
-        `1. On the server, edit ${cfgPath} and add this project to the coding config: inside "coding": { "projects": { … } }, add "${ev.context.projectId}": "/absolute/path/to/the/repo".\n` +
-        `2. Restart the agent.\n` +
-        `Then tasks and discussions in this project will operate in that folder. For non-coding questions, just answer normally without mentioning any of this.`;
+        `You have no filesystem access here yet, because this BasicOps project (id ${ev.context.projectId}) isn't mapped to a local folder on this server. ` +
+        `You CAN fix that: if the operator names a folder (an absolute path on this server), call the \`attach_project\` tool with projectId ${ev.context.projectId} and that directory — it takes effect immediately, no restart. ` +
+        `If they want coding work here but haven't given a path, ask which folder to attach (offer to create one). ` +
+        `Only attach when they clearly want engineering work in this project. For non-coding questions, just answer normally without mentioning any of this.`;
     }
 
     const response = query({
@@ -183,7 +195,7 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
         payload,
       options: {
         resume,
-        mcpServers,
+        mcpServers: turnMcpServers,
         plugins: caps.plugins,
         allowedTools,
         disallowedTools: BLOCKED_TOOLS,
