@@ -19,6 +19,8 @@ export type ListenerConfig = {
   port: number;
   /** Optional extra MCP connectors + skill plugins from the per-agent config file. */
   capabilities?: AgentCapabilities;
+  /** Path to this agent's config file (cited when guiding the user to attach a project). */
+  configPath?: string;
 };
 
 // Destructive tools the agent must never call (blocked even though the whole
@@ -158,9 +160,21 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
     else if (allowlisted) console.log(`  [coding] user allowed but no directory mapped for project ${ev.context.projectId ?? "(none)"}`);
 
     const allowedTools = coder ? [...baseAllowedTools, ...CODING_TOOLS] : baseAllowedTools;
-    const turnSystemPrompt = coder
-      ? `${systemPrompt}\n\n## Coding mode (trusted operator)\nYou have full filesystem + shell access in the working directory \`${coder.workdir}\` on this server. Do the engineering work requested — read/edit files, run commands, use git (pull, branch, commit, push) and gh, build, and test — with your tools. Complete the work before replying; then make your HTML reply a concise summary of what you did (files changed, commands run, results, branch/PR links).`
-      : systemPrompt;
+    let turnSystemPrompt = systemPrompt;
+    if (coder) {
+      turnSystemPrompt = `${systemPrompt}\n\n## Coding mode (trusted operator)\nYou have full filesystem + shell access in the working directory \`${coder.workdir}\` on this server. Do the engineering work requested — read/edit files, run commands, use git (pull, branch, commit, push) and gh, build, and test — with your tools. Complete the work before replying; then make your HTML reply a concise summary of what you did (files changed, commands run, results, branch/PR links).`;
+    } else if (allowlisted && ev.context.projectId != null) {
+      // Allowlisted operator, but this project isn't attached to a folder yet.
+      const cfgPath = cfg.configPath ?? "~/.config/basicops-agent/<agent>.json";
+      turnSystemPrompt =
+        `${systemPrompt}\n\n## This project isn't attached to a folder yet\n` +
+        `You have NO filesystem/shell access here, because this BasicOps project (id ${ev.context.projectId}) ` +
+        `is not mapped to a local directory on the server. If the request needs engineering work (editing/running/building code, git), ` +
+        `do NOT attempt it — instead explain that the project must be attached to a folder first, and give these exact steps:\n` +
+        `1. On the server, edit ${cfgPath} and add this project to the coding config: inside "coding": { "projects": { … } }, add "${ev.context.projectId}": "/absolute/path/to/the/repo".\n` +
+        `2. Restart the agent.\n` +
+        `Then tasks and discussions in this project will operate in that folder. For non-coding questions, just answer normally without mentioning any of this.`;
+    }
 
     const response = query({
       prompt:
