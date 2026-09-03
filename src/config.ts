@@ -36,11 +36,17 @@ export type AgentCapabilities = {
   instructions?: string;
   /**
    * Optional "coding agent" mode: give the agent real filesystem + shell access
-   * (Read/Write/Edit/Bash/Grep/Glob → git, gh, builds) in `workdir`, but ONLY for
-   * events triggered by a BasicOps user id in `allowUsers`. Everyone else gets the
-   * normal sealed agent. Omit entirely to keep the agent fully sealed.
+   * (Read/Write/Edit/Bash/Grep/Glob → git, gh, builds), but ONLY for events
+   * triggered by a BasicOps user id in `allowUsers`. Everyone else gets the normal
+   * sealed agent. Omit entirely to keep the agent fully sealed.
+   *
+   * The working directory is chosen per event: if the event is in a BasicOps
+   * project mapped in `projects` (projectId → local dir), that directory is used —
+   * so a project is "attached" to a folder and its tasks/discussions operate there.
+   * `workdir` is the fallback for events not in a mapped project. At least one of
+   * `projects` or `workdir` must be set.
    */
-  coding?: { workdir: string; allowUsers: number[] };
+  coding?: { workdir?: string; allowUsers: number[]; projects?: Record<string, string> };
 };
 
 const EMPTY: AgentCapabilities = { mcpServers: {}, plugins: [], allowedTools: [] };
@@ -130,9 +136,17 @@ export function loadCapabilities(agent: string): AgentCapabilities {
     typeof parsed.instructions === "string" && parsed.instructions.trim() ? parsed.instructions.trim() : undefined;
 
   let coding: AgentCapabilities["coding"];
-  if (parsed.coding && typeof parsed.coding.workdir === "string" && Array.isArray(parsed.coding.allowUsers)) {
+  if (parsed.coding && Array.isArray(parsed.coding.allowUsers)) {
     const allowUsers = parsed.coding.allowUsers.map(Number).filter((n: number) => Number.isFinite(n));
-    if (allowUsers.length) coding = { workdir: parsed.coding.workdir, allowUsers };
+    const workdir = typeof parsed.coding.workdir === "string" ? parsed.coding.workdir : undefined;
+    const projects: Record<string, string> = {};
+    if (parsed.coding.projects && typeof parsed.coding.projects === "object") {
+      for (const [k, v] of Object.entries(parsed.coding.projects)) if (typeof v === "string") projects[String(k)] = v;
+    }
+    const hasProjects = Object.keys(projects).length > 0;
+    if (allowUsers.length && (workdir || hasProjects)) {
+      coding = { allowUsers, ...(workdir ? { workdir } : {}), ...(hasProjects ? { projects } : {}) };
+    }
   }
 
   return { mcpServers, plugins, allowedTools, instructions, coding };

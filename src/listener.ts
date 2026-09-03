@@ -145,9 +145,17 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
 
     // Coding mode: ONLY when this event was triggered by an allowlisted user.
     // Fail closed — no userId, or not on the list, means the normal sealed agent.
-    const coder =
-      caps.coding && ev.userId != null && caps.coding.allowUsers.includes(Number(ev.userId)) ? caps.coding : undefined;
+    // The working directory is the one mapped to this event's BasicOps project
+    // (project "attached" to a folder), falling back to the default workdir.
+    const allowlisted = !!caps.coding && ev.userId != null && caps.coding.allowUsers.includes(Number(ev.userId));
+    let workdir: string | undefined;
+    if (allowlisted && caps.coding) {
+      const pid = ev.context.projectId != null ? String(ev.context.projectId) : undefined;
+      workdir = (pid && caps.coding.projects?.[pid]) || caps.coding.workdir;
+    }
+    const coder = allowlisted && workdir ? { workdir } : undefined;
     if (coder) console.log(`  [coding] enabled for user ${ev.userId} in ${coder.workdir}`);
+    else if (allowlisted) console.log(`  [coding] user allowed but no directory mapped for project ${ev.context.projectId ?? "(none)"}`);
 
     const allowedTools = coder ? [...baseAllowedTools, ...CODING_TOOLS] : baseAllowedTools;
     const turnSystemPrompt = coder
