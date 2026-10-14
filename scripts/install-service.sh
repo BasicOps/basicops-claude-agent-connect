@@ -41,6 +41,50 @@ echo "✓ wrote credentials to $ENVFILE (mode 600)"
 UNIT="basicops-agent-$SLUG.service"
 PATH_LINE="$BIN_DIR:$NODE_DIR:$CLAUDE_DIR:$TS_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# macOS: a per-user launchd agent (no sudo). launchd has no EnvironmentFile, so a
+# bash wrapper sources the env file; node runs bin.js directly (no exec-bit reliance).
+if [ "$(uname -s)" = "Darwin" ]; then
+  REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  NODE="$(command -v node)"
+  LABEL="com.basicops.agent.$SLUG"
+  PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+  LOG="$HOME/Library/Logs/basicops-agent-$SLUG.log"
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>set -a; . "$ENVFILE"; set +a; exec "$NODE" "$REPO/dist/bin.js"</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>$HOME_DIR</string>
+    <key>PATH</key><string>$PATH_LINE</string>
+  </dict>
+  <key>WorkingDirectory</key><string>$HOME_DIR</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$LOG</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo
+  echo "✓ $LABEL installed and started (starts at login, restarts if it exits)."
+  echo "  Logs:    tail -f $LOG"
+  echo "  Restart: launchctl kickstart -k gui/$(id -u)/$LABEL"
+  echo "  Stop:    launchctl bootout gui/$(id -u)/$LABEL"
+  exit 0
+fi
+
 echo "Installing $UNIT (sudo may prompt)…"
 sudo tee "/etc/systemd/system/$UNIT" >/dev/null <<EOF
 [Unit]
