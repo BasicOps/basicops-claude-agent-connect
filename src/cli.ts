@@ -23,6 +23,7 @@ import {
 } from "./funnel.js";
 import { startListener } from "./listener.js";
 import { loadCapabilities, configPath } from "./config.js";
+import { RuleBook } from "./rules.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -230,12 +231,12 @@ async function tailscalePreflight(): Promise<boolean> {
 }
 
 /**
- * Offer to install a persistent systemd service (Linux only). Returns true if a
+ * Offer to install a persistent service (systemd on Linux, launchd on macOS). Returns true if a
  * service was installed and started — in which case the caller should NOT also
  * run the agent in the foreground.
  */
 async function offerServiceInstall(apiKey: string, agent: string, dmTarget?: string): Promise<boolean> {
-  if (process.platform !== "linux") return false; // systemd only
+  if (process.platform !== "linux" && process.platform !== "darwin") return false;
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ans = (
@@ -245,7 +246,11 @@ async function offerServiceInstall(apiKey: string, agent: string, dmTarget?: str
   if (ans === "n" || ans === "no") return false;
 
   const script = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "install-service.sh");
-  c.step("Installing systemd service (sudo may prompt for your password)");
+  c.step(
+    process.platform === "darwin"
+      ? "Installing launchd agent"
+      : "Installing systemd service (sudo may prompt for your password)",
+  );
   await new Promise<void>((resolve, reject) => {
     const child = spawn("bash", [script], {
       stdio: "inherit",
@@ -361,7 +366,6 @@ async function main() {
   // Offer the persistent service (interactive only), now that we know the agent.
   if (interactive && (await offerServiceInstall(apiKey, agent, dmTarget))) {
     c.ok("Agent installed as a service and started. It will keep running and survive reboots.");
-    c.info(`Logs: journalctl -u basicops-agent-${agent} -f`);
     // The service runs the connect sequence (incl. the DM) a moment from now.
     announceConnected(displayName, dmTarget, /* future */ true);
     return;
@@ -376,7 +380,14 @@ async function main() {
   c.ok(`Skill plugins: ${pluginNames.length ? pluginNames.join(", ") : "(none)"}`);
   if (nServers) c.ok(`Extra MCP connectors: ${Object.keys(capabilities.mcpServers).join(", ")}`);
   if (capabilities.instructions) c.ok(`Custom instructions: ${capabilities.instructions.length} chars`);
+  if (capabilities.claudeAiConnectors?.length)
+    c.ok(`claude.ai connectors (operator turns only): ${capabilities.claudeAiConnectors.join(", ")}`);
   c.info(`Add more (skills / MCP / instructions) at ${configPath(agent)}`);
+
+  // Standing rules from the Justin AI OS vault (same for every agent, re-read each run).
+  const rules = new RuleBook(capabilities.vault);
+  if (rules.vault) c.ok(`Standing rules: ${rules.files().length} files (global + Agent-User) from ${rules.vault}`);
+  else c.info(`\x1b[33m!\x1b[0m Justin AI OS vault not found: set JUSTIN_AI_OS_VAULT or "vault" in ${configPath(agent)}`);
 
   // 2. Bind the listener first (so the Funnel has something to proxy to).
   c.step("Starting listener");
@@ -388,6 +399,8 @@ async function main() {
     capabilities,
     configPath: configPath(agent),
     getCoding: () => loadCapabilities(agent).coding, // re-read so attach_project hot-applies
+    getProactive: () => loadCapabilities(agent).proactive, // re-read so config edits hot-apply
+    rules,
   });
   c.ok(`Listener is up on port ${boundPort}`);
 

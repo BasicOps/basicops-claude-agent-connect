@@ -16,7 +16,10 @@
  *       }
  *     },
  *     "plugins": ["/abs/path/to/plugin-dir"],  // each bundles skills/<name>/SKILL.md
- *     "allowedTools": ["Read", "Grep"]          // extra tools to permit (advanced)
+ *     "allowedTools": ["Read", "Grep"],         // extra tools to permit (advanced)
+ *     "vault": "/abs/path/to/justin-os",        // Justin AI OS vault clone (see rules.ts)
+ *     "claudeAiConnectors": ["Gmail"],          // operator's claude.ai connectors (see connectors.ts)
+ *     "claudeCodePath": "/abs/path/to/claude"   // Claude Code binary (default: `claude` on PATH)
  *   }
  */
 import { readFileSync, existsSync } from "node:fs";
@@ -34,6 +37,15 @@ export type AgentCapabilities = {
   allowedTools: string[];
   /** Operator-supplied instructions appended to the agent's system prompt. */
   instructions?: string;
+  /** Justin AI OS vault clone the standing rules load from. Default: auto-resolved (see rules.ts). */
+  vault?: string;
+  /**
+   * claude.ai connectors (e.g. "Gmail", "Google Calendar") the agent may use on
+   * turns triggered by a coding.allowUsers operator. Never loaded for anyone else.
+   */
+  claudeAiConnectors?: string[];
+  /** Claude Code binary to run (needed for claude.ai connectors). Default: `claude` on PATH. */
+  claudeCodePath?: string;
   /**
    * Optional "coding agent" mode: give the agent real filesystem + shell access
    * (Read/Write/Edit/Bash/Grep/Glob → git, gh, builds), but ONLY for events
@@ -47,6 +59,28 @@ export type AgentCapabilities = {
    * `projects` or `workdir` must be set.
    */
   coding?: { workdir?: string; allowUsers: number[]; projects?: Record<string, string> };
+  /**
+   * Optional "proactive" mode: on a schedule (hourly during work hours by
+   * default) the agent reviews the user's open work in the attached projects and
+   * nudges them — a DM with the priorities plus firm comments on slipping tasks.
+   * The agent is purely reactive when this is omitted or `enabled` is not true.
+   */
+  proactive?: {
+    enabled: boolean;
+    /** BasicOps user id to nudge. Defaults to coding.allowUsers[0]. */
+    dmUserId?: number;
+    /** Project ids to review. Defaults to the keys of coding.projects. */
+    projects?: string[];
+    /** Work-hours window, local time, inclusive by hour (defaults 9..18). */
+    startHour?: number;
+    endHour?: number;
+    /** Days to run on, 0=Sun..6=Sat (defaults Mon–Fri). */
+    days?: number[];
+    /** Also post nudge comments on slipping tasks, not just the DM (default true). */
+    taskComments?: boolean;
+    /** Tone hint for the nudges (default "firm"). */
+    tone?: string;
+  };
 };
 
 const EMPTY: AgentCapabilities = { mcpServers: {}, plugins: [], allowedTools: [] };
@@ -135,6 +169,12 @@ export function loadCapabilities(agent: string): AgentCapabilities {
   const instructions =
     typeof parsed.instructions === "string" && parsed.instructions.trim() ? parsed.instructions.trim() : undefined;
 
+  const vault = typeof parsed.vault === "string" && parsed.vault.trim() ? parsed.vault.trim() : undefined;
+  const claudeAiConnectors = Array.isArray(parsed.claudeAiConnectors)
+    ? parsed.claudeAiConnectors.filter((n: unknown) => typeof n === "string" && n.trim()).map((n: string) => n.trim())
+    : undefined;
+  const claudeCodePath = typeof parsed.claudeCodePath === "string" ? parsed.claudeCodePath : undefined;
+
   let coding: AgentCapabilities["coding"];
   if (parsed.coding && Array.isArray(parsed.coding.allowUsers)) {
     const allowUsers = parsed.coding.allowUsers.map(Number).filter((n: number) => Number.isFinite(n));
@@ -149,5 +189,21 @@ export function loadCapabilities(agent: string): AgentCapabilities {
     }
   }
 
-  return { mcpServers, plugins, allowedTools, instructions, coding };
+  let proactive: AgentCapabilities["proactive"];
+  if (parsed.proactive && parsed.proactive.enabled === true) {
+    const p = parsed.proactive;
+    const num = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : undefined);
+    proactive = {
+      enabled: true,
+      dmUserId: num(p.dmUserId),
+      projects: Array.isArray(p.projects) ? p.projects.map(String) : undefined,
+      startHour: num(p.startHour),
+      endHour: num(p.endHour),
+      days: Array.isArray(p.days) ? p.days.map(Number).filter((n: number) => Number.isFinite(n)) : undefined,
+      taskComments: typeof p.taskComments === "boolean" ? p.taskComments : undefined,
+      tone: typeof p.tone === "string" ? p.tone : undefined,
+    };
+  }
+
+  return { mcpServers, plugins, allowedTools, instructions, vault, claudeAiConnectors, claudeCodePath, coding, proactive };
 }
