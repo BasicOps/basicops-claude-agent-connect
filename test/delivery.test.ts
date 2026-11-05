@@ -168,3 +168,26 @@ test("a backed-up conversation is reported instead of queueing without limit", a
   await Promise.all([first.result, second.result]);
   assert.equal(gate.run("1", async () => {}).accepted, true, "the lane recovers once it drains");
 });
+
+test("turns on different conversations never run more than the cap at once", async () => {
+  // 2026-11-05: thirteen reassignments started thirteen sessions and froze claw.
+  const gate = new DeliveryGate({ maxConcurrent: 2 });
+  let live = 0, peak = 0;
+  const turn = () => new Promise<void>((done) => {
+    live += 1; peak = Math.max(peak, live);
+    setTimeout(() => { live -= 1; done(); }, 20);
+  });
+  const runs = Array.from({ length: 13 }, (_, i) => gate.run(`task-${i}`, turn).result);
+  await Promise.all(runs);
+  assert.equal(peak, 2);
+  assert.equal(gate.running(), 0);
+});
+
+test("a failing turn frees its slot for the next one", async () => {
+  const gate = new DeliveryGate({ maxConcurrent: 1 });
+  const failed = gate.run("a", async () => { throw new Error("boom"); }).result!;
+  await assert.rejects(failed);
+  const ok = await gate.run("b", async () => "next").result;
+  assert.equal(ok, "next");
+  assert.equal(gate.running(), 0);
+});

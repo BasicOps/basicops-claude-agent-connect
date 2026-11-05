@@ -31,6 +31,15 @@ import { createHash } from "node:crypto";
 /** How long an identical body on the same conversation is treated as a repeat. */
 export const DEDUPE_WINDOW_MS = 120_000;
 
+/**
+ * Turns running at once across every conversation. Each turn is a full agent
+ * session (several hundred MB); on 2026-11-05 thirteen task reassignments
+ * started thirteen sessions together and pinned claw at 100% CPU with memory
+ * exhausted until it was restarted. Further turns wait their turn instead.
+ * Override with BASICOPS_MAX_CONCURRENT_TURNS.
+ */
+export const MAX_CONCURRENT_TURNS = Math.max(1, Number(process.env.BASICOPS_MAX_CONCURRENT_TURNS) || 2);
+
 /** Turns allowed to wait behind a running one on the same conversation. */
 export const MAX_QUEUED_PER_CONV = 4;
 
@@ -82,8 +91,12 @@ export class DeliveryGate {
   private readonly now: () => number;
   private readonly seen = new Map<string, number>();
   private readonly lanes = new Map<string, Lane>();
+  private readonly maxConcurrent: number;
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
 
-  constructor(opts: { windowMs?: number; maxQueued?: number; now?: () => number } = {}) {
+  constructor(opts: { windowMs?: number; maxQueued?: number; maxConcurrent?: number; now?: () => number } = {}) {
+    this.maxConcurrent = Math.max(1, opts.maxConcurrent ?? MAX_CONCURRENT_TURNS);
     this.windowMs = opts.windowMs ?? DEDUPE_WINDOW_MS;
     this.maxQueued = opts.maxQueued ?? MAX_QUEUED_PER_CONV;
     this.now = opts.now ?? Date.now;
@@ -101,6 +114,24 @@ export class DeliveryGate {
     return true;
   }
 
+  /** Turns running right now, across every conversation. */
+  running(): number {
+    return this.active;
+  }
+
+  private acquire(): Promise<void> {
+    if (this.active < this.maxConcurrent) {
+      this.active += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.waiting.push(() => { this.active += 1; resolve(); }));
+  }
+
+  private release(): void {
+    this.active -= 1;
+    this.waiting.shift()?.();
+  }
+
   /** Turns currently running or waiting on a conversation. */
   depth(convId: string): number {
     return this.lanes.get(convId)?.pending ?? 0;
@@ -116,7 +147,10 @@ export class DeliveryGate {
     if (lane.pending >= this.maxQueued) return { accepted: false, queued: lane.pending };
     lane.pending += 1;
     this.lanes.set(convId, lane);
-    const result = lane.tail.then(() => task());
+    // Wait for this conversation's previous turn, then for a free slot.
+    const result = lane.tail
+      .then(() => this.acquire())
+      .then(() => task().finally(() => this.release()));
     // The lane must never inherit a rejection, or one failed turn would skip
     // every turn queued behind it.
     lane.tail = result.then(
