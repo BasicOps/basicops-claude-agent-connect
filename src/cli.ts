@@ -24,6 +24,7 @@ import {
 import { startListener } from "./listener.js";
 import { loadCapabilities, configPath } from "./config.js";
 import { RuleBook } from "./rules.js";
+import { PersistedMap, statePath } from "./state.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -297,6 +298,7 @@ Options:
   --dm <email|id>    BasicOps user to DM when the agent connects (or set
                      BASICOPS_DM). Interactive install asks for this.
   --webhook-url <u>  Public webhook URL; skips Tailscale Funnel if provided
+  --announce         Send the connect DM even if it was already sent once
   --help             Show this help
 `);
 }
@@ -385,8 +387,8 @@ async function main() {
   c.info(`Add more (skills / MCP / instructions) at ${configPath(agent)}`);
 
   // Standing rules from the Justin AI OS vault (same for every agent, re-read each run).
-  const rules = new RuleBook(capabilities.vault);
-  if (rules.vault) c.ok(`Standing rules: ${rules.files().length} files (global + Agent-User) from ${rules.vault}`);
+  const rules = new RuleBook(capabilities.vault, capabilities.workplaceRules);
+  if (rules.vault) c.ok(`Standing rules: ${rules.files().length} files (global + Agent-User${capabilities.workplaceRules?.length ? " + workplace" : ""}) from ${rules.vault}`);
   else c.info(`\x1b[33m!\x1b[0m Justin AI OS vault not found: set JUSTIN_AI_OS_VAULT or "vault" in ${configPath(agent)}`);
 
   // 2. Bind the listener first (so the Funnel has something to proxy to).
@@ -437,19 +439,27 @@ async function main() {
     if (!userId) {
       c.info(`⚠ No BasicOps user found for "${dmTarget}" — skipping connect DM (check the email is a workspace member).`);
     } else {
-      const chat = await client.call<any>("create_chat", { userId }).catch((e: any) => ({ __err: e.message }));
-      const chatId = chat?.id ?? chat?.chatId;
-      if (!chatId) {
-        c.info(`⚠ Couldn't open a direct chat with user ${userId} — skipping DM${chat?.__err ? ` (${chat.__err})` : ""}.`);
+      // Only the first connect DMs. Restarts (watchdog, deploys, reboots) stay quiet.
+      const announced = new PersistedMap<string>(statePath(configPath(agent), "announced"));
+      const prior = announced.get(String(userId));
+      if (prior && !args.announce) {
+        c.info(`Already sent the connect DM to ${dmTarget} on ${prior}, skipping (pass --announce to resend).`);
       } else {
-        await client.call("create_message_in_chat", {
-          chatId,
-          message:
-            `<p>👋 <strong>${displayName}</strong> is connected and live.</p>` +
-            `<p>Message me here, or @-mention me in any task, chat, or channel, and I'll help.</p>`,
-        });
-        c.ok(`DM sent to ${dmTarget} (user ${userId})`);
-        dmSent = true;
+        const chat = await client.call<any>("create_chat", { userId }).catch((e: any) => ({ __err: e.message }));
+        const chatId = chat?.id ?? chat?.chatId;
+        if (!chatId) {
+          c.info(`⚠ Couldn't open a direct chat with user ${userId} — skipping DM${chat?.__err ? ` (${chat.__err})` : ""}.`);
+        } else {
+          await client.call("create_message_in_chat", {
+            chatId,
+            message:
+              `<p>👋 <strong>${displayName}</strong> is connected and live.</p>` +
+              `<p>Message me here, or @-mention me in any task, chat, or channel, and I'll help.</p>`,
+          });
+          c.ok(`DM sent to ${dmTarget} (user ${userId})`);
+          announced.set(String(userId), new Date().toISOString());
+          dmSent = true;
+        }
       }
     }
   }

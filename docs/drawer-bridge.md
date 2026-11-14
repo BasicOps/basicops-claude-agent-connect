@@ -115,6 +115,56 @@ later on the stream.
 - **Watch the per-turn cost.** It is reported on each `turn done` event, and the
   first turn of a session is dearer than it looks.
 
+## The Chrome extension
+
+`extension/` puts the drawer in a Chrome side panel. It is the same `drawer.js`
+in a different container: the bridge and the protocol are untouched.
+
+Two reasons it exists rather than pasting `inject.js` into the page:
+
+- **It can reach the bridge.** An extension page is not a public origin, so
+  Chrome's local network block does not apply and the panel can hold an
+  `EventSource` open to `http://127.0.0.1:4710` directly. No tunnel.
+- **It gets a better answer to "which task".** A content script runs at
+  `document_start` in the page's own world and patches `fetch`/`XHR` before the
+  app loads. When BasicOps opens a task it GETs `/v1/task/<id>`, and the reply
+  carries the title, so the id comes from what the app actually did rather than
+  from a URL format that contradicts itself. The URL parser is still there as a
+  fallback for a tab that was already on a task before the script loaded.
+
+### Load it
+
+1. `npm run bridge` (leave it running)
+2. `chrome://extensions`, turn on Developer mode
+3. **Load unpacked**, pick `extension/`
+4. Open a BasicOps task, click the extension's toolbar icon
+5. Paste the bridge token once when the drawer asks, then bind a folder
+
+The panel follows whichever tab is in front, so a task opening in a background
+tab does not move it.
+
+### Files
+
+| File | Does |
+|------|------|
+| `manifest.json` | side panel, host permission for the bridge, content scripts |
+| `sidepanel.html` / `.js` | mounts `drawer.js`, follows the active tab |
+| `watch-main.js` | page world: patches `fetch`/`XHR`, reads the task id and title |
+| `watch.js` | extension world: relays to the worker, URL fallback |
+| `background.js` | remembers the open task per tab |
+| `drawer.js` | a copy. `npm run ext:sync` after editing `drawer/drawer.js`. |
+
+The copy is there because MV3 forbids loading remote code, so the panel cannot
+import `drawer.js` from the bridge. One source of truth stays
+`drawer/drawer.js`; the sync script keeps the copy honest.
+
+### What it does not fix
+
+The extension is yours, on this machine. It is not something a BasicOps
+customer gets, and the bridge is still on loopback running shell commands as
+you. If this ever ships to other people, the transport question reopens on
+different terms.
+
 ## Using it in a real BasicOps
 
 Tested against the live app on 2026-11-14. Two things block an injected drawer,

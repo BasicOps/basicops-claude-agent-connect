@@ -13,7 +13,8 @@
     "README.md",
     "DEPLOY.md",
     "panel",
-    "drawer"
+    "drawer",
+    "extension"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/bin.js",
@@ -22,7 +23,8 @@
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build",
     "bridge": "tsx src/bridge-bin.ts",
-    "bridge:start": "node dist/bridge-bin.js"
+    "bridge:start": "node dist/bridge-bin.js",
+    "ext:sync": "cp drawer/drawer.js extension/drawer.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "BasicOps task drawer",
+  "version": "0.1.0",
+  "description": "A Claude session bound to the BasicOps task you have open, and to a folder on this Mac.",
+  "permissions": ["sidePanel", "storage", "tabs"],
+  "host_permissions": [
+    "http://127.0.0.1:4710/*",
+    "http://localhost:4710/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Open the task drawer" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.basicops.com/*"],
+      "js": ["watch-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://*.basicops.com/*"],
+      "js": ["watch.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ]
+}

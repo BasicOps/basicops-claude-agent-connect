@@ -7,6 +7,9 @@
  * Per-conversation session memory + a loop guard for the agent's own messages.
  */
 import http from "node:http";
+import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentCapabilities } from "./config.js";
 import { AGENT_SYSTEM_PROMPT } from "./prompt.js";
@@ -14,7 +17,9 @@ import { BasicOpsClient } from "./basicops.js";
 import { selfConfigServer } from "./selfconfig.js";
 import { PersistedMap, sessionExists, statePath } from "./state.js";
 import { RuleBook, type AttachedProject } from "./rules.js";
-import { connectorsForTurn, isSendApproval, resolveClaudeExecutable, type TurnConnectors } from "./connectors.js";
+import { basicopsReadOnlyHook, fenceHook, fenceRoots, workplaceLock } from "./fence.js";
+import { chromeForTurn } from "./chrome.js";
+import { connectorPrefix, connectorsForTurn, isSendApproval, resolveClaudeExecutable, type TurnConnectors } from "./connectors.js";
 
 export type ListenerConfig = {
   mcpUrl: string;
@@ -36,11 +41,16 @@ export type ListenerConfig = {
 // Destructive tools the agent must never call (blocked even though the whole
 // BasicOps server is otherwise allowed). disallowedTools takes precedence.
 const BLOCKED_TOOLS = [
-  "delete_task", "delete_project", "delete_note", "delete_section",
-  "delete_channel", "delete_groupchat", "delete_message", "delete_reply",
-  "delete_template", "delete_time_entry", "delete_task_dependency", "delete_webhook",
-  "deactivate_user", "reactivate_user",
-].map((t) => `mcp__basicops__${t}`);
+  ...[
+    "delete_task", "delete_project", "delete_note", "delete_section",
+    "delete_channel", "delete_groupchat", "delete_message", "delete_reply",
+    "delete_template", "delete_time_entry", "delete_task_dependency", "delete_webhook",
+    "deactivate_user", "reactivate_user",
+  ].map((t) => `mcp__basicops__${t}`),
+  // Wakeups, crons and monitors keep the session open after the reply, so the
+  // listener never posts it and the "working" status spins until restart.
+  "ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "Monitor", "RemoteTrigger",
+];
 
 type Incoming = {
   event: string;
@@ -92,6 +102,11 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
 
   const caps = cfg.capabilities ?? { mcpServers: {}, plugins: [], allowedTools: [] };
 
+  // Inside the folder fence, for files the agent downloads to look at (a
+  // screenshot in a message, an attachment) and other throwaway work.
+  const scratchDir = join(tmpdir(), "basicops-scratch", cfg.agentUserId);
+  mkdirSync(scratchDir, { recursive: true });
+
   // The built-in BasicOps connector, plus any extra ones from config.
   const mcpServers = {
     basicops: {
@@ -124,7 +139,7 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
 
   // Standing rules (vault AGENTS.md + BasicOps rules + attached project), re-read
   // every run so all agents follow the current vault without a restart.
-  const rules = cfg.rules ?? new RuleBook(caps.vault);
+  const rules = cfg.rules ?? new RuleBook(caps.vault, caps.workplaceRules);
   const withRules = (system: string, projects: AttachedProject[]) => `${system}\n\n${rules.build(projects)}`;
 
   // System prompt = the Agent doc + standing rules, plus any operator instructions from the config.
@@ -178,7 +193,7 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
   // Run the agent on the payload, then POST its returned HTML to the right
   // surface — unless the agent already posted a message itself (then we stay out
   // to avoid a duplicate). Empty output = intentional silence.
-  async function handleEvent(ev: Incoming) {
+  async function handleEvent(ev: Incoming, interrupted = false) {
     const payload = JSON.stringify({ context: ev.context, request: ev.request });
 
     // Coding mode: ONLY when this event was triggered by an allowlisted user.
@@ -215,6 +230,10 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
     let turnSystemPrompt = systemPrompt;
     if (coder) {
       turnSystemPrompt = `${systemPrompt}\n\n## Coding mode (trusted operator)\nThe working directory \`${coder.workdir}\` on this server IS this BasicOps project's local workspace — the source of truth for the project's files, folders, docs, and code. You have full filesystem + shell access there.\n\nWhen the request refers to a file, folder, directory, list, doc, README, "the codebase", or "the directories" that would live in the project, LOOK IN \`${coder.workdir}\` FIRST — run \`ls\`/\`Grep\`/\`Read\` (e.g. check the repo and its docs/ folder) before concluding it doesn't exist or assuming it's only a BasicOps note. Only fall back to searching BasicOps notes/tasks if it's clearly not a file. Do the engineering work requested — read/edit files, run commands, use git (pull, branch, commit, push) and gh, build, and test — with your tools. Complete the work before replying; then make your HTML reply a concise summary (files/commands, results, and any tasks created with their links).\n\nYou can also attach ANOTHER BasicOps project to a folder for the operator with the \`attach_project\` tool.`;
+      if (coding?.allowedDirs?.length) {
+        turnSystemPrompt += `\n\nThe folders you may use on this machine are exactly: ${coding.allowedDirs.map((d) => `\`${d}\``).join(", ")}. Go straight to the one you need; don't list their parent folder, which is blocked.`;
+        turnSystemPrompt += ` Save downloads (images, attachments, screenshots to look at) and other scratch files in \`${scratchDir}\`, not /tmp.`;
+      }
     } else if (allowlisted && ev.context.projectId != null) {
       // Allowlisted operator, but this project isn't attached to a folder yet —
       // and you CAN attach it yourself with attach_project.
@@ -241,18 +260,54 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
       console.log(`  [connectors] ${caps.claudeAiConnectors!.join(", ")}${approvedSend ? " (send approved)" : ""}`);
     }
 
+    // Shell/file turns get the fence (credentials always; folders when allowedDirs
+    // is set); connector turns also get the connector guardrails.
+    const preToolHooks = [
+      ...(coder
+        ? [
+            fenceHook(
+              coder.workdir,
+              coding?.allowedDirs?.length ? fenceRoots([...coding.allowedDirs, scratchDir], caps.plugins.map((p) => p.path)) : undefined,
+              coding?.allowedDirs?.length ? [...coding.allowedDirs, scratchDir] : undefined,
+            ),
+          ]
+        : []),
+      ...(conn ? [conn.hook] : []),
+      ...(caps.basicopsReadOnly ? [basicopsReadOnlyHook] : []),
+    ];
+    // Writes as the operator in BasicOps only after the connector proves its workplace this run.
+    // Only the operator's own turns may use it at all.
+    const ob = caps.operatorBasicops;
+    const lock = ob
+      ? workplaceLock(ob.server ? `mcp__${ob.server}` : connectorPrefix(ob.connector!), ob.workplaceUrl, allowlisted)
+      : undefined;
+    if (lock) preToolHooks.push(lock.pre);
+    // Operator turns with connectors can also browse, read-only, in the operator's Chrome.
+    const chrome = conn && caps.chrome ? chromeForTurn(caps.chrome.deviceId) : undefined;
+    if (chrome) {
+      preToolHooks.push(chrome.hook);
+      turnSystemPrompt = `${turnSystemPrompt}\n\n${chrome.prompt}`;
+    }
+
     const response = query({
       prompt:
         "You received a BasicOps webhook event. Handle it and produce your reply. " +
+        (interrupted
+          ? "You were already working on this message when you were restarted, so some of it may be done. " +
+            "Check what's already done (files, git, posts) before redoing anything. "
+          : "") +
         "Event payload:\n\n" +
         payload,
       options: {
         resume,
         mcpServers: turnMcpServers,
         plugins: caps.plugins,
-        allowedTools: conn ? [...allowedTools, ...conn.allowedTools] : allowedTools,
+        allowedTools: [...allowedTools, ...(conn?.allowedTools ?? []), ...(chrome?.allowedTools ?? [])],
+        ...(chrome ? { extraArgs: chrome.extraArgs } : {}),
         disallowedTools: BLOCKED_TOOLS,
-        ...(conn ? { hooks: { PreToolUse: [{ hooks: [conn.hook] }] } } : {}),
+        ...(preToolHooks.length
+          ? { hooks: { PreToolUse: [{ hooks: preToolHooks }], ...(lock ? { PostToolUse: [{ hooks: [lock.post] }] } : {}) } }
+          : {}),
         systemPrompt: turnSystemPrompt,
         maxTurns: coder ? 60 : 14,
         // Installed `claude`: operator turns load the connectors (which requires
@@ -293,6 +348,9 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
         sessions.set(ev.convId, m.session_id);
         if ((m as any).subtype === "success" && typeof (m as any).result === "string") finalText = (m as any).result;
         console.log(`  done (${m.num_turns} turns)`);
+        // Post now: anything still running in the background (a backgrounded
+        // shell, a subagent) would otherwise hold the reply back indefinitely.
+        break;
       }
     }
 
@@ -309,7 +367,56 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
     } else {
       console.log("  agent stayed silent");
     }
-    await clearStatus(ev.context);
+  }
+
+  // Messages being answered, persisted so a restart (funnel watchdog, deploy,
+  // crash) re-runs an interrupted turn on startup instead of dropping it with
+  // the "working" status left spinning. Capped so a message that kills the
+  // agent can't crash-loop it.
+  const inflight = new PersistedMap<{ ev: Incoming; tries: number; at: number }>(statePath(cfg.configPath, "inflight"));
+  const MAX_TRIES = 3;
+  const MAX_AGE_MS = 24 * 3_600_000;
+
+  // Show BasicOps's "working" indicator for the whole turn. It expires after
+  // 5 minutes, so renew it; and poll-picked messages never had it set. If
+  // BasicOps won't take it, say in the thread that the message arrived.
+  const setWorking = (ctx: Record<string, any>) =>
+    client
+      .call("set_agent_status", { event: ctx.event ?? "", id: ctx.messageId ?? ctx.replyId ?? "", status: "working", message: "Working on it" })
+      .then(() => true, () => false);
+
+  async function runTracked(ev: Incoming) {
+    const id = String(ev.context.replyId ?? ev.context.messageId ?? "");
+    const prior = id ? inflight.get(id) : undefined;
+    if (id) inflight.set(id, { ev, tries: (prior?.tries ?? 0) + 1, at: prior?.at ?? Date.now() });
+    if (!(await setWorking(ev.context))) {
+      await postToSurface(ev.context, "<p>Got it, working on it.</p>").catch(() => {});
+    }
+    const renew = setInterval(() => setWorking(ev.context), 4 * 60_000);
+    try {
+      await handleEvent(ev, !!prior);
+    } catch (err) {
+      console.error("  handler error:", err);
+    } finally {
+      clearInterval(renew);
+      if (id) inflight.delete(id);
+      await clearStatus(ev.context);
+    }
+  }
+
+  function resumeInterrupted() {
+    for (const [id, { ev, tries, at }] of [...inflight]) {
+      if (tries >= MAX_TRIES || Date.now() - at > MAX_AGE_MS) {
+        console.log(`[resume] giving up on message ${id} after ${tries} tries`);
+        inflight.delete(id);
+        postToSurface(ev.context, "<p>I was interrupted several times while working on this and stopped. Please send it again.</p>")
+          .catch(() => {})
+          .finally(() => clearStatus(ev.context));
+        continue;
+      }
+      console.log(`[resume] re-running interrupted message ${id} (conv ${ev.convId}): ${htmlToText(ev.request).slice(0, 100)}`);
+      runTracked(ev);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -393,6 +500,7 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
         sessionId = m.session_id;
         if ((m as any).subtype === "success" && typeof (m as any).result === "string") summary = (m as any).result.trim();
         console.log(`  [${o.label}] done (${m.num_turns} turns): ${htmlToText(summary).slice(0, 160)}`);
+        break; // don't wait on background work (see handleEvent)
       }
     }
     return sessionId;
@@ -488,6 +596,118 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
     setInterval(proactiveTick, 60_000).unref?.(); // check each minute; dedupes per hour
   }
 
+  // ---------------------------------------------------------------------------
+  // Listen channels: answer every new message and thread reply in these
+  // channels, not only @mentions. BasicOps pushes only mentions, so we poll.
+  // Mentions are skipped here (the webhook already delivers them), as are the
+  // agent's own posts. A persisted cursor per channel means a restart neither
+  // replays history nor drops what arrived while the agent was down.
+  // ---------------------------------------------------------------------------
+  // onlyUsers: the agent acts for these BasicOps users and silently ignores everyone else.
+  const onlyUsers = caps.onlyUsers?.length ? caps.onlyUsers : undefined;
+  const allowedSender = (ev: Incoming) => !onlyUsers || (ev.userId != null && onlyUsers.includes(Number(ev.userId)));
+
+  // Tell the operator (onlyUsers[0]) when someone else tried to reach the agent.
+  let operatorChatId: string | number | undefined;
+  const escapeHtml = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  async function notifyOperator(ev: Incoming) {
+    if (!onlyUsers) return;
+    const ctx = ev.context;
+    const who = await client.call<any>("get_user", { userId: Number(ev.userId) }).catch(() => undefined);
+    const name = [who?.firstName, who?.lastName].filter(Boolean).join(" ") || `user ${ev.userId ?? "unknown"}`;
+    let where = ctx.chatId ? "a direct message" : ctx.groupChatId ? "a group chat" : ctx.channelId ? "a channel" : ctx.projectId ? "a project discussion" : "BasicOps";
+    if (ctx.taskId) {
+      const task = await client.call<any>("get_task", { taskId: Number(ctx.taskId) }).catch(() => undefined);
+      where = task?.url && task?.title ? `the task <a href="${task.url}">${escapeHtml(task.title)}</a>` : "a task";
+    }
+    const excerpt = htmlToText(ev.request).slice(0, 300);
+    if (!operatorChatId) {
+      const chat = await client.call<any>("create_chat", { userId: onlyUsers[0] });
+      operatorChatId = chat?.id ?? chat?.chatId;
+      if (!operatorChatId) throw new Error("couldn't open a direct chat with the operator");
+    }
+    await client.call("create_message_in_chat", {
+      chatId: operatorChatId,
+      message:
+        `<p><strong>${escapeHtml(name)}</strong> tried to reach me in ${where}. I didn't reply, since I only work for you.</p>` +
+        (excerpt ? `<blockquote>${escapeHtml(excerpt)}</blockquote>` : ""),
+    });
+    console.log(`  [ignored] told user ${onlyUsers[0]} that ${name} tried to reach me`);
+  }
+
+  const channelCursor = new PersistedMap<number>(statePath(cfg.configPath, "channel-cursor"));
+  const mentionsMe = new RegExp(`user-link[^>]*_id="${cfg.agentUserId}"`);
+  // Message/reply ids already handled (webhook or poll), so neither path answers twice.
+  const handled = new PersistedMap<number>(statePath(cfg.configPath, "handled-messages"));
+  const markHandled = (ctx: Record<string, any>) => {
+    const id = ctx.replyId ?? ctx.messageId;
+    if (id == null) return;
+    handled.set(String(id), Date.now());
+    for (const [k, t] of handled) if (Date.now() - t > 7 * 86_400_000) handled.delete(k);
+  };
+  // A mention normally arrives by webhook within seconds; the poll picks it up only if it hasn't.
+  const MENTION_GRACE_MS = 30_000;
+  let polling = false;
+
+  async function pollChannels(channelIds: number[]) {
+    if (polling) return;
+    polling = true;
+    try {
+      for (const channelId of channelIds) {
+        const key = String(channelId);
+        const cursor = channelCursor.get(key);
+        if (cursor == null) {
+          channelCursor.set(key, Date.now()); // first run: start from now, don't answer history
+          continue;
+        }
+        const res = await client.call<{ data?: any[] }>("list_messages_in_channel", { channelId, limit: 20 });
+        const fresh: (Incoming & { mention: boolean })[] = [];
+        for (const m of res?.data ?? []) {
+          for (const item of [m, ...(m.replies ?? [])]) {
+            // `created` was epoch ms and is now an ISO string with offset; accept both.
+            const created = typeof item.created === "number" ? item.created : Date.parse(item.created);
+            if (!(created > cursor) || String(item.userId) === cfg.agentUserId) continue;
+            if (onlyUsers && !onlyUsers.includes(Number(item.userId))) continue;
+            const isReply = item !== m;
+            fresh.push({
+              mention: mentionsMe.test(item.message ?? ""),
+              event: isReply ? "basicops.channel.reply.created" : "basicops.channel.message.created",
+              context: { event: isReply ? "basicops.channel.reply.created" : "basicops.channel.message.created", userId: item.userId, channelId, messageId: m.id, ...(isReply ? { replyId: item.id } : {}), created },
+              request: item.message ?? "",
+              userId: item.userId,
+              convId: key,
+              fromAgent: false,
+            });
+          }
+        }
+        fresh.sort((a, b) => a.context.created - b.context.created);
+        for (const ev of fresh) {
+          const id = String(ev.context.replyId ?? ev.context.messageId);
+          if (!handled.has(id)) {
+            // Give the webhook time to deliver a mention; stop here so the cursor can't pass it.
+            if (ev.mention && Date.now() - ev.context.created < MENTION_GRACE_MS) break;
+            console.log(`[channel ${channelId}] ${ev.event}${ev.mention ? " (mention the webhook missed)" : ""}: ${htmlToText(ev.request).slice(0, 100)}`);
+            markHandled(ev.context);
+            await runTracked(ev);
+          }
+          // Advance only once handled: a restart mid-run re-answers rather than drops the message.
+          channelCursor.set(key, ev.context.created);
+        }
+      }
+    } catch (e: any) {
+      console.error("  [channels] poll error:", e?.message ?? e, e?.cause?.code ?? e?.cause?.message ?? "");
+    } finally {
+      polling = false;
+    }
+  }
+
+  if (caps.listenChannels?.length) {
+    const ids = caps.listenChannels;
+    console.log(`▶ Answering every message (no @mention needed) in channels ${ids.join(", ")}`);
+    pollChannels(ids);
+    setInterval(() => pollChannels(ids), 15_000).unref?.();
+  }
+
   const server = http.createServer((req, res) => {
     if (req.method !== "POST" || !req.url?.startsWith("/webhook")) {
       res.writeHead(404).end();
@@ -508,6 +728,12 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
 
       for (const ev of parseEvents(body, cfg.agentUserId)) {
         if (ev.fromAgent) continue; // loop guard: skip the agent's own messages
+        if (!allowedSender(ev)) {
+          console.log(`[ignored] ${ev.event || "event"} from user ${ev.userId ?? "-"} (not in onlyUsers)`);
+          await clearStatus(ev.context); // don't leave a "working" status on an ignored mention
+          if (ev.request) await notifyOperator(ev).catch((e) => console.error("  [ignored] DM to operator failed:", e?.message ?? e));
+          continue;
+        }
         // Diagnostic: log EVERY inbound event so we can see what BasicOps forwards
         // (incl. state changes with no message body, e.g. task completions).
         console.log(
@@ -525,11 +751,13 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
           continue;
         }
         console.log(`[${ev.event || "event"}] conv ${ev.convId}: ${htmlToText(ev.request).slice(0, 100)}`);
-        try {
-          await handleEvent(ev);
-        } catch (err) {
-          console.error("  handler error:", err);
+        const evId = ev.context.replyId ?? ev.context.messageId;
+        if (evId != null && handled.has(String(evId))) {
+          console.log("  already handled (picked up by the channel poll); skipping");
+          continue;
         }
+        markHandled(ev.context);
+        await runTracked(ev);
       }
     });
   });
@@ -541,6 +769,7 @@ export function startListener(cfg: ListenerConfig): Promise<number> {
       const actual = typeof addr === "object" && addr ? addr.port : cfg.port;
       console.log(`Listener bound on http://localhost:${actual}/webhook`);
       resolve(actual);
+      resumeInterrupted();
     }),
   );
 }

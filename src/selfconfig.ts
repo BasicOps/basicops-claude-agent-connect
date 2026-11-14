@@ -5,7 +5,8 @@
  * agent's own config; it can't touch anything else on the box.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { expandHome, isWithin } from "./fence.js";
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 
@@ -39,6 +40,10 @@ export function selfConfigServer(configFilePath: string) {
           cfg.coding ??= {};
           if (!Array.isArray(cfg.coding.allowUsers) || cfg.coding.allowUsers.length === 0) {
             return err("Coding mode has no allowUsers configured, so I can't safely enable filesystem access. Ask the operator to set coding.allowUsers first.");
+          }
+          const allowedDirs: string[] = Array.isArray(cfg.coding.allowedDirs) ? cfg.coding.allowedDirs : [];
+          if (allowedDirs.length && !isWithin(dir, allowedDirs.map((d) => resolve(expandHome(d))))) {
+            return err(`${dir} is outside the folders this agent may use (coding.allowedDirs: ${allowedDirs.join(", ")}). Ask the operator to add it there first.`);
           }
           cfg.coding.projects ??= {};
           cfg.coding.projects[pid] = dir;

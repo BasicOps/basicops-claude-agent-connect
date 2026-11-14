@@ -9,6 +9,8 @@
  *      AGENT-OPERATING-RULES.md (scripts/install-rules.sh sets this up).
  *   2. Agent-User: the agent was called from inside a BasicOps account, so it
  *      loads the vault's 70 SOPs/BasicOps-Agent-User-Rules.md. Any project.
+ *   2b. Workplace: rule files from the agent config's `workplaceRules`, for an
+ *      agent whose whole workplace belongs to one client. Every run.
  *   3. Project: the attached project's folder and its CLAUDE.md,
  *      CLAUDE.local.md and AGENTS.md. A BasicOps client project's
  *      CLAUDE.local.md imports the BasicOps client rules, so those apply only
@@ -100,8 +102,11 @@ export class RuleBook {
   readonly vault: string | undefined;
   private lastPull = 0;
 
-  constructor(configuredVault?: string) {
+  private readonly workplaceRules: string[];
+
+  constructor(configuredVault?: string, workplaceRules: string[] = []) {
     this.vault = resolveVault(configuredVault);
+    this.workplaceRules = workplaceRules.map((p) => (p.startsWith("~/") ? join(homedir(), p.slice(2)) : p));
   }
 
   /** Fast-forward the vault clone at most every 10 min, in the background. */
@@ -128,6 +133,7 @@ export class RuleBook {
     const seen = new Set<string>();
     const global = this.globalFiles(seen);
     const agentUser = this.vault ? loadWithImports(join(this.vault, AGENT_USER_RULES_DOC), seen) : [];
+    const workplace = this.workplaceRules.flatMap((p) => loadWithImports(p, seen));
     const project =
       projects.length === 1 && projects[0].dir
         ? PROJECT_RULE_FILES.flatMap((name) => loadWithImports(join(projects[0].dir!, name), seen))
@@ -135,6 +141,7 @@ export class RuleBook {
     return [
       { title: "1. Global rules (every agent, every surface)", files: global },
       { title: "2. BasicOps Agent-User rules (you were called from a BasicOps account)", files: agentUser },
+      { title: "2b. Workplace rules (they apply to everything in this BasicOps workplace)", files: workplace },
       { title: "3. Project rules", files: project },
     ];
   }
@@ -142,10 +149,10 @@ export class RuleBook {
   /** The full rule stack as a system-prompt section, re-read from disk each call. */
   build(projects: AttachedProject[] = []): string {
     this.refresh();
-    const [global, agentUser, project] = this.sections(projects);
+    const [global, agentUser, workplace, project] = this.sections(projects);
     const out: string[] = [
       `# Standing rules`,
-      `You load the same rules as every Claude Code session Justin runs, plus the BasicOps Agent-User rules, fresh on every run from the Justin AI OS vault. Follow them in everything you write, post or do. Where they conflict, the more specific scope wins: project over Agent-User over global. Client rules (for example the BasicOps copy rules) apply only when the project's own rules import them.`,
+      `You load the same rules as every Claude Code session Justin runs, plus the BasicOps Agent-User rules, fresh on every run from the Justin AI OS vault. Follow them in everything you write, post or do. Where they conflict, the more specific scope wins: project over Agent-User over global. Client rules (for example the BasicOps copy rules) apply only when the workplace rules or the project's own rules include them.`,
     ];
     if (!this.vault) {
       out.push(`The Justin AI OS vault is not available on this machine. Mention once to the operator that the vault clone is missing (set JUSTIN_AI_OS_VAULT or "vault" in the agent config).`);
@@ -154,6 +161,10 @@ export class RuleBook {
     for (const s of [global, agentUser]) {
       out.push(`## ${s.title}`);
       out.push(s.files.length ? s.files.map((f) => `### ${tilde(f.path)}\n\n${f.text}`).join("\n\n") : "(none found on this machine)");
+    }
+    if (workplace.files.length) {
+      out.push(`## ${workplace.title}`);
+      out.push(workplace.files.map((f) => `### ${tilde(f.path)}\n\n${f.text}`).join("\n\n"));
     }
 
     out.push(`## ${project.title}`);

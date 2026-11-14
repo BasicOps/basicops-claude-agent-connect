@@ -37,6 +37,10 @@ const POLICIES: Record<string, Policy> = {
       `Never trash mail, mark it as spam, or delete labels.`,
   },
 };
+/** Policy by connector family, so "Gmail - Basicops" gets the Gmail guardrails. */
+const policyFor = (name: string): Policy | undefined =>
+  POLICIES[name] ?? Object.entries(POLICIES).find(([family]) => name.startsWith(`${family} `))?.[1];
+
 const APPROVED_SEND_RULES =
   `The operator just approved sending the drafts from your previous reply. Send exactly those emails, ` +
   `unchanged: send_message with the same to, subject and body (or reply / forward for a draft that answers an existing thread). ` +
@@ -80,7 +84,7 @@ export function connectorsForTurn(allowed: string[], approvedSend: boolean): Tur
   const draftTools: string[] = [];
   const rules: string[] = [];
   for (const name of allowed) {
-    const p = POLICIES[name];
+    const p = policyFor(name);
     if (!p) continue;
     const pre = connectorPrefix(name);
     for (const t of p.blocked) denied.set(`${pre}__${t}`, `${name} ${t} is never allowed for this agent.`);

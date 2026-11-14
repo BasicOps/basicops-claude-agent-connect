@@ -164,6 +164,15 @@ export async function startBridge(): Promise<number> {
   // The real app is allowed by default; anything else goes in `origins`.
   const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, "https://app.basicops.com", ...(cfg.origins ?? [])]);
 
+  /**
+   * The side panel's origin is `chrome-extension://<id>`, and the id is only
+   * known once the extension is loaded, so it cannot be listed ahead of time.
+   * Allowing the scheme is no weaker than what already guards this port: an
+   * extension needs an explicit host permission for 127.0.0.1 before it can
+   * ask at all, and every request still has to carry the token.
+   */
+  const allowed = (origin: string) => origins.has(origin) || origin.startsWith("chrome-extension://");
+
   /** Push an event to every panel watching this task. */
   const send = (task: string, event: Record<string, unknown>) => {
     const line = `data: ${JSON.stringify(event)}\n\n`;
@@ -312,7 +321,7 @@ export async function startBridge(): Promise<number> {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
     const origin = req.headers.origin;
-    if (origin && origins.has(origin)) {
+    if (origin && allowed(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
     }

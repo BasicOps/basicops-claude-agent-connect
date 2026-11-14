@@ -13,6 +13,11 @@
  *         "url": "https://api.example.com/mcp",
  *         "authToken": "xxx",           // → Authorization: Bearer xxx
  *         "headers": { "X-Extra": "1" } // merged (authToken wins Authorization)
+ *       },
+ *       "gmail": {                       // the agent's own Google sign-in (scripts/google-mcp-token.mjs)
+ *         "type": "http",
+ *         "url": "https://gmailmcp.googleapis.com/mcp/v1",
+ *         "headersHelper": "node /abs/scripts/google-mcp-token.mjs headers /abs/token.json"
  *       }
  *     },
  *     "plugins": ["/abs/path/to/plugin-dir"],  // each bundles skills/<name>/SKILL.md
@@ -40,6 +45,36 @@ export type AgentCapabilities = {
   /** Justin AI OS vault clone the standing rules load from. Default: auto-resolved (see rules.ts). */
   vault?: string;
   /**
+   * Rule files loaded on every run, for an agent whose whole workplace belongs to
+   * one client (e.g. the BasicOps client rules for an agent in BasicOps's own
+   * workplace). `@imports` are expanded; `~` = home.
+   */
+  workplaceRules?: string[];
+  /**
+   * Channel ids where the agent answers every new message and thread reply, not
+   * just @mentions. BasicOps only pushes mentions, so these are polled.
+   */
+  listenChannels?: number[];
+  /**
+   * The agent's own BasicOps key may only read (get_/list_/download_/link_to_).
+   * Its conversation replies still post, because the listener posts them.
+   */
+  basicopsReadOnly?: boolean;
+  /**
+   * The operator's own BasicOps connection and the only workplace it may write
+   * to: either an `mcpServers` entry the operator signed in to (`server`) or a
+   * claude.ai connector (`connector`), e.g.
+   * { server: "basicops-taskflow", workplaceUrl: "https://taskflow.basicops.com" }.
+   */
+  operatorBasicops?: { server?: string; connector?: string; workplaceUrl: string };
+  /**
+   * Read-only browsing in the operator's Chrome (Claude in Chrome) on operator
+   * turns: `true` uses the current selection, `{ deviceId }` pins one profile.
+   */
+  chrome?: { deviceId?: string };
+  /** When set, the agent ignores every event from a BasicOps user not on this list. */
+  onlyUsers?: number[];
+  /**
    * claude.ai connectors (e.g. "Gmail", "Google Calendar") the agent may use on
    * turns triggered by a coding.allowUsers operator. Never loaded for anyone else.
    */
@@ -56,9 +91,10 @@ export type AgentCapabilities = {
    * project mapped in `projects` (projectId → local dir), that directory is used —
    * so a project is "attached" to a folder and its tasks/discussions operate there.
    * `workdir` is the fallback for events not in a mapped project. At least one of
-   * `projects` or `workdir` must be set.
+   * `projects` or `workdir` must be set. `allowedDirs` (optional) fences file
+   * and shell work, and attach_project, to those folders (see fence.ts).
    */
-  coding?: { workdir?: string; allowUsers: number[]; projects?: Record<string, string> };
+  coding?: { workdir?: string; allowUsers: number[]; projects?: Record<string, string>; allowedDirs?: string[] };
   /**
    * Optional "proactive" mode: on a schedule (hourly during work hours by
    * default) the agent reviews the user's open work in the attached projects and
@@ -119,6 +155,8 @@ type RawServer = {
   env?: Record<string, string>;
   authToken?: string;
   headers?: Record<string, string>;
+  /** Command printing a JSON object of headers on each connect (e.g. scripts/google-mcp-token.mjs). */
+  headersHelper?: string;
 };
 
 /** Turn a config entry into a real SDK McpServerConfig (authToken → Bearer header). */
@@ -129,7 +167,13 @@ function normalizeServer(name: string, s: RawServer): McpServerConfig {
   if (!s.url) throw new Error(`mcpServers.${name}: needs a "url" (http/sse) or "command" (stdio)`);
   const headers: Record<string, string> = { ...(s.headers ?? {}) };
   if (s.authToken) headers.Authorization = `Bearer ${s.authToken}`;
-  return { type: s.type === "sse" ? "sse" : "http", url: s.url, headers } as McpServerConfig;
+  return {
+    type: s.type === "sse" ? "sse" : "http",
+    url: s.url,
+    headers,
+    // Not in the SDK's type, but the installed `claude` reads it from --mcp-config.
+    ...(s.headersHelper ? { headersHelper: s.headersHelper } : {}),
+  } as McpServerConfig;
 }
 
 /**
@@ -173,6 +217,30 @@ export function loadCapabilities(agent: string): AgentCapabilities {
   const claudeAiConnectors = Array.isArray(parsed.claudeAiConnectors)
     ? parsed.claudeAiConnectors.filter((n: unknown) => typeof n === "string" && n.trim()).map((n: string) => n.trim())
     : undefined;
+  const workplaceRules = Array.isArray(parsed.workplaceRules)
+    ? parsed.workplaceRules.filter((r: unknown) => typeof r === "string" && r.trim()).map((r: string) => r.trim())
+    : undefined;
+  const listenChannels = Array.isArray(parsed.listenChannels)
+    ? parsed.listenChannels.map(Number).filter((n: number) => Number.isFinite(n))
+    : undefined;
+  const ob = parsed.operatorBasicops;
+  const operatorBasicops =
+    ob && (typeof ob.server === "string" || typeof ob.connector === "string") && typeof ob.workplaceUrl === "string"
+      ? {
+          ...(typeof ob.server === "string" ? { server: ob.server } : { connector: ob.connector }),
+          workplaceUrl: ob.workplaceUrl.replace(/\/$/, ""),
+        }
+      : undefined;
+  const chrome =
+    parsed.chrome === true
+      ? {}
+      : typeof parsed.chrome?.deviceId === "string" && parsed.chrome.deviceId.trim()
+        ? { deviceId: parsed.chrome.deviceId.trim() }
+        : undefined;
+  const basicopsReadOnly = parsed.basicopsReadOnly === true || undefined;
+  const onlyUsers = Array.isArray(parsed.onlyUsers)
+    ? parsed.onlyUsers.map(Number).filter((n: number) => Number.isFinite(n))
+    : undefined;
   const claudeCodePath = typeof parsed.claudeCodePath === "string" ? parsed.claudeCodePath : undefined;
 
   let coding: AgentCapabilities["coding"];
@@ -185,7 +253,15 @@ export function loadCapabilities(agent: string): AgentCapabilities {
     }
     const hasProjects = Object.keys(projects).length > 0;
     if (allowUsers.length && (workdir || hasProjects)) {
-      coding = { allowUsers, ...(workdir ? { workdir } : {}), ...(hasProjects ? { projects } : {}) };
+      const allowedDirs = Array.isArray(parsed.coding.allowedDirs)
+        ? parsed.coding.allowedDirs.filter((d: unknown) => typeof d === "string" && d.trim())
+        : undefined;
+      coding = {
+        allowUsers,
+        ...(workdir ? { workdir } : {}),
+        ...(hasProjects ? { projects } : {}),
+        ...(allowedDirs?.length ? { allowedDirs } : {}),
+      };
     }
   }
 
@@ -205,5 +281,5 @@ export function loadCapabilities(agent: string): AgentCapabilities {
     };
   }
 
-  return { mcpServers, plugins, allowedTools, instructions, vault, claudeAiConnectors, claudeCodePath, coding, proactive };
+  return { mcpServers, plugins, allowedTools, instructions, vault, workplaceRules, listenChannels, onlyUsers, basicopsReadOnly, operatorBasicops, chrome, claudeAiConnectors, claudeCodePath, coding, proactive };
 }
