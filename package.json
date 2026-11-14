@@ -6,13 +6,22 @@
   "bin": {
     "basicops-connect": "dist/bin.js"
   },
-  "files": ["dist", "scripts", "plugins", "README.md", "DEPLOY.md"],
+  "files": [
+    "dist",
+    "scripts",
+    "plugins",
+    "README.md",
+    "DEPLOY.md",
+    "panel"
+  ],
   "scripts": {
     "build": "tsc && chmod +x dist/bin.js",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "bridge": "tsx src/bridge-bin.ts",
+    "bridge:start": "node dist/bridge-bin.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",

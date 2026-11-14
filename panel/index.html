@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawer bridge</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fff;
+        --fg: #16181d;
+        --muted: #6b7280;
+        --line: #e4e6eb;
+        --card: #f6f7f9;
+        --accent: #2f6feb;
+        --warn: #8a5a00;
+        --warn-bg: #fff6e0;
+        font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #15171c;
+          --fg: #e8eaed;
+          --muted: #9aa1ad;
+          --line: #2a2e36;
+          --card: #1d2026;
+          --accent: #7aa2f7;
+          --warn: #ffd28a;
+          --warn-bg: #3a2c0d;
+        }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font-size: 14px; }
+      .wrap { max-width: 780px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-height: 100vh; }
+      h1 { font-size: 15px; margin: 0; font-weight: 600; }
+      .sub { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+      .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      input, textarea, button { font: inherit; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); padding: 7px 9px; }
+      input { min-width: 0; }
+      input.grow { flex: 1 1 140px; }
+      textarea { width: 100%; resize: vertical; min-height: 64px; }
+      button { background: var(--card); cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      #log { flex: 1; border: 1px solid var(--line); border-radius: 9px; padding: 12px; overflow-y: auto; min-height: 240px; background: var(--card); }
+      .msg { margin: 0 0 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+      .tool { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; }
+      .note { color: var(--muted); font-size: 12px; }
+      .err { color: #c0392b; }
+      .ask { background: var(--warn-bg); color: var(--warn); border: 1px solid currentColor; border-radius: 8px; padding: 9px; margin: 0 0 10px; }
+      .ask pre { margin: 6px 0; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+      .ask .bar { margin-top: 6px; }
+      .status { color: var(--muted); font-size: 12px; }
+      .status b { color: var(--fg); font-weight: 500; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div>
+        <h1>Drawer bridge</h1>
+        <p class="sub">A throwaway stand-in for the BasicOps drawer. One task id, one session, one folder.</p>
+      </div>
+
+      <div class="bar">
+        <input id="token" class="grow" type="password" placeholder="bridge token" />
+        <input id="task" style="flex: 0 1 150px" placeholder="task id" />
+        <button id="watch" class="primary">Watch</button>
+      </div>
+
+      <div class="bar">
+        <input id="dir" class="grow" placeholder="/Users/you/src/some-repo" />
+        <button id="bind">Bind folder</button>
+      </div>
+
+      <p class="status" id="status">Not watching.</p>
+
+      <div id="log"></div>
+
+      <textarea id="text" placeholder="Ask this task's Claude something. Enter to send, Shift+Enter for a new line."></textarea>
+      <div class="bar">
+        <button id="send" class="primary">Send</button>
+        <button id="stop">Stop</button>
+        <span class="note" id="hint"></span>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const log = $("log");
+      let stream = null;
+      let streaming = null; // the <p> the current reply is being typed into
+
+      const params = new URLSearchParams(location.search);
+      if (params.get("t")) $("token").value = params.get("t");
+      $("task").value = localStorage.getItem("task") || "";
+      $("dir").value = localStorage.getItem("dir") || "";
+
+      const token = () => $("token").value.trim();
+      const task = () => $("task").value.trim();
+
+      function add(cls, text) {
+        const p = document.createElement("p");
+        p.className = cls;
+        p.textContent = text;
+        log.append(p);
+        log.scrollTop = log.scrollHeight;
+        return p;
+      }
+
+      function status(s) {
+        $("status").innerHTML = s;
+      }
+
+      async function call(path, payload) {
+        const res = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + token() },
+          body: JSON.stringify({ task: task(), ...payload }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || res.statusText);
+        return data;
+      }
+
+      function ask(ev) {
+        const box = document.createElement("div");
+        box.className = "ask";
+        const head = document.createElement("div");
+        head.textContent = "Allow " + ev.name + "?";
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(ev.input, null, 1).slice(0, 1200);
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        const allow = document.createElement("button");
+        allow.className = "primary";
+        allow.textContent = "Allow";
+        const deny = document.createElement("button");
+        deny.textContent = "Deny";
+        const answer = (ok) => async () => {
+          allow.disabled = deny.disabled = true;
+          try {
+            await call("/approve", { id: ev.id, allow: ok });
+            head.textContent = (ok ? "Allowed " : "Denied ") + ev.name;
+          } catch (e) {
+            add("msg err", e.message);
+          }
+        };
+        allow.onclick = answer(true);
+        deny.onclick = answer(false);
+        bar.append(allow, deny);
+        box.append(head, pre, bar);
+        log.append(box);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function watch() {
+        if (!token() || !task()) return add("msg err", "Enter the bridge token and a task id.");
+        localStorage.setItem("task", task());
+        stream?.close();
+        streaming = null;
+        const url = "/events?task=" + encodeURIComponent(task()) + "&t=" + encodeURIComponent(token());
+        stream = new EventSource(url);
+        stream.onopen = () => refresh();
+        stream.onerror = () => status("Stream dropped. Retrying.");
+        stream.onmessage = (e) => {
+          const ev = JSON.parse(e.data);
+          if (ev.type === "text") {
+            if (!streaming) streaming = add("msg", "");
+            streaming.textContent += ev.text;
+            log.scrollTop = log.scrollHeight;
+          } else if (ev.type === "tool") {
+            streaming = null;
+            add("msg tool", ev.name + " " + JSON.stringify(ev.input).slice(0, 300));
+          } else if (ev.type === "ask") {
+            streaming = null;
+            ask(ev);
+          } else if (ev.type === "bound") {
+            add("msg note", "Folder bound: " + ev.workdir + (ev.sessionId ? " (session kept)" : " (new session)"));
+            refresh();
+          } else if (ev.type === "turn") {
+            streaming = null;
+            if (ev.state === "start") add("msg note", (ev.resumed ? "Resuming this task's session in " : "New session in ") + ev.workdir);
+            else if (ev.state === "done") {
+              add("msg note", "Done in " + ev.turns + " turns" + (ev.cost ? " (" + ev.cost.toFixed(3) + " USD)" : ""));
+              refresh();
+            } else if (ev.state === "stopped") add("msg note", "Stopped.");
+            else add("msg err", "Failed: " + (ev.error || "unknown"));
+          }
+        };
+        status("Watching <b>" + task() + "</b>.");
+      }
+
+      async function refresh() {
+        try {
+          const res = await fetch("/state?task=" + encodeURIComponent(task()) + "&t=" + encodeURIComponent(token()));
+          const s = await res.json();
+          if (!res.ok) throw new Error(s.error);
+          status(
+            "Task <b>" + task() + "</b> · folder <b>" + (s.workdir || "none yet") + "</b> · session <b>" +
+              (s.sessionId ? s.sessionId.slice(0, 8) : "none") + "</b>" + (s.busy ? " · working" : ""),
+          );
+          if (s.workdir) $("dir").value = s.workdir;
+        } catch (e) {
+          status("<span class='err'>" + e.message + "</span>");
+        }
+      }
+
+      $("watch").onclick = watch;
+      $("bind").onclick = async () => {
+        localStorage.setItem("dir", $("dir").value.trim());
+        try {
+          await call("/bind", { workdir: $("dir").value.trim() });
+        } catch (e) {
+          add("msg err", e.message);
+        }
+      };
+      $("send").onclick = async () => {
+        const text = $("text").value.trim();
+        if (!text) return;
+        if (!stream) watch();
+        add("msg", "You: " + text);
+        $("text").value = "";
+        try {
+          await call("/message", { text });
+        } catch (e) {
+          add("msg err", e.message);
+        }
+      };
+      $("stop").onclick = async () => {
+        try {
+          await call("/stop", {});
+        } catch (e) {
+          add("msg err", e.message);
+        }
+      };
+      $("text").onkeydown = (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          $("send").click();
+        }
+      };
+      if (token() && task()) watch();
+    </script>
+  </body>
+</html>
