@@ -54,6 +54,7 @@ const STATIC: Record<string, { path: string; type: string }> = {
   "/": { path: "panel/index.html", type: HTML },
   "/demo": { path: "drawer/demo.html", type: HTML },
   "/drawer.js": { path: "drawer/drawer.js", type: "text/javascript; charset=utf-8" },
+  "/inject.js": { path: "drawer/inject.js", type: "text/javascript; charset=utf-8" },
 };
 
 /** The only tools a drawer turn can reach at all. */
@@ -160,7 +161,8 @@ export async function startBridge(): Promise<number> {
   const runs = new Map<string, Run>();
   const clients = new Map<string, Set<http.ServerResponse>>();
 
-  const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, ...(cfg.origins ?? [])]);
+  // The real app is allowed by default; anything else goes in `origins`.
+  const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`, "https://app.basicops.com", ...(cfg.origins ?? [])]);
 
   /** Push an event to every panel watching this task. */
   const send = (task: string, event: Record<string, unknown>) => {
@@ -321,7 +323,14 @@ export async function startBridge(): Promise<number> {
     };
 
     if (req.method === "OPTIONS") {
-      res.writeHead(204, { "Access-Control-Allow-Methods": "GET, POST, OPTIONS" });
+      const extra: Record<string, string> = { "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
+      // A page on a public site reaching 127.0.0.1 is a Private Network Access
+      // request: Chrome preflights it and needs this header, or the drawer in
+      // the real app can't call the bridge at all.
+      if (req.headers["access-control-request-private-network"] === "true") {
+        extra["Access-Control-Allow-Private-Network"] = "true";
+      }
+      res.writeHead(204, extra);
       return res.end();
     }
 

@@ -33,7 +33,10 @@ const CSS = `
     --accent: #7aa2f7; --warn: #ffd28a; --warn-bg: #3a2c0d; --err: #ff8a80;
   }
 }
-.head { padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.head { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.head .line { display: flex; gap: 8px; align-items: baseline; }
+.head .label { color: var(--fg); font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head .label:empty { display: none; }
 .head .title { font-weight: 600; }
 .head .meta { color: var(--muted); font-size: 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
@@ -79,7 +82,12 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   const meta = el("span", "meta", "No task");
   meta.title = "Click to change this task's folder";
   meta.onclick = () => current && auth && bindPrompt();
-  head.append(dot, title, meta);
+  // The task's own name, as the app knows it. If the drawer ever picked up the
+  // wrong task, this is what makes that obvious instead of silent.
+  const label = el("div", "label");
+  const line = el("div", "line");
+  line.append(dot, title, meta);
+  head.append(line, label);
   const body = el("div", "body");
   const foot = el("div", "foot");
   const input = el("textarea");
@@ -300,9 +308,13 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     };
   }
 
-  function setTask(id) {
+  function setTask(id, name) {
     id = id == null ? null : String(id);
-    if (id === current) return;
+    if (id === current) {
+      if (name) label.textContent = name;
+      return;
+    }
+    label.textContent = name || "";
     current = id;
     typing = null;
     state = {};

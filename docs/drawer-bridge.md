@@ -114,3 +114,60 @@ later on the stream.
   thread yet.
 - **Watch the per-turn cost.** It is reported on each `turn done` event, and the
   first turn of a session is dearer than it looks.
+
+## Using it in a real BasicOps
+
+Tested against the live app on 2026-11-14. Two things block an injected drawer,
+and both come from injecting rather than from the drawer itself.
+
+### Chrome won't let the app reach the bridge
+
+`https://app.basicops.com` cannot open `http://127.0.0.1:4710`. Not CORS, and
+not mixed content: the request never leaves the browser, so nothing reaches the
+bridge. A plain fetch, a `no-cors` fetch and an `<img>` all hang. This is
+Chrome's local network access restriction on a public page reaching a local
+address. The bridge answers the Private Network Access preflight
+(`Access-Control-Allow-Private-Network`), which is necessary and not sufficient.
+
+The ways out, in the order worth trying:
+
+1. **Give the bridge an https origin on the tailnet.** This Mac already runs
+   Tailscale, so `tailscale serve --bg --https=8443 --set-path=/
+   http://127.0.0.1:4710` puts it at
+   `https://<machine>.<tailnet>.ts.net:8443` with a real certificate, reachable
+   from the tailnet only, not the internet. Then point the drawer at that
+   origin and add it to `origins`. Use `serve`, never `funnel`: this bridge
+   runs shell commands, and Funnel is the public internet.
+2. **A Chrome extension.** Its service worker can reach `127.0.0.1` with host
+   permissions, so it works where the page cannot. That is the one job the
+   extension is genuinely needed for, and it is a transport, not a way to
+   work out which task is open.
+3. **The app ships its own transport**, which is the real answer, and the only
+   one that works for anybody other than you.
+
+### The URL does not reliably say which task is open
+
+BasicOps has at least three URL shapes and they contradict each other. With a
+task open over a list, the path names the list's task and the page title names
+that one too, while the task actually on screen appears only as `3936.<id>`
+inside the `ol-` query parameter:
+
+```
+/…/list/l2221477/v95673-2221477/task-details/…?ol-…/3936.2221868/…
+       ^ not the open task                              ^ the open task
+```
+
+`drawer/inject.js` handles all three (overlay first, then the plain
+`/list/l<id>/` route, then the `?l=` share link, whose token is the id in base
+36 with six more characters; checked against 50 real tasks). It gets the live
+app right.
+
+But read that again: the obvious signals point at a **neighbouring real task**,
+not at nothing. A wrong read binds a session to a plausible wrong task rather
+than failing visibly. The drawer shows the task name beside the id for exactly
+that reason, and a task can do nothing until you bind a folder to it.
+
+This is the mixup you called out when you chose the drawer over the extension,
+and it is worse than it looked from outside. Inside the app it doesn't exist:
+the app knows the task and passes it to `setTask`. Injection is a way to try
+the thing, not a way to ship it.
