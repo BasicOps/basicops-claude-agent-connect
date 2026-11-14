@@ -5,9 +5,10 @@ session + one folder, remembered across restarts. Switching tasks in the app is
 just a different task id on the wire, so the session that answers switches with
 it, with nothing inferred from a URL or a front tab.
 
-This is the local half of the BasicOps drawer. The drawer UI itself lives in the
-BasicOps web app; until it exists, `/` serves a throwaway panel that speaks the
-same protocol.
+This is the local half of the BasicOps drawer. The drawer UI is in
+[`drawer/drawer.js`](../drawer/drawer.js): one framework-free ES module the app
+mounts, with everything inside a shadow root so the app's CSS and the drawer's
+can't reach each other.
 
 ## Run it
 
@@ -28,11 +29,43 @@ and prints the panel URL. Open it, paste a task id and a folder, and talk.
 | `origins` | Browser origins allowed to call the bridge, e.g. `https://app.basicops.com`. |
 | `claudePath` | Claude Code binary. Default: `claude` on PATH. |
 
+## Putting the drawer in the app
+
+```js
+import { mountDrawer } from "./drawer.js";
+
+const drawer = mountDrawer({
+  bridge: "http://127.0.0.1:4710",
+  mount: document.querySelector("#drawer"),
+});
+
+// The whole contract: call this on every task route change.
+drawer.setTask(task.id);
+```
+
+That one call is the app's entire job. The drawer asks the bridge which folder
+and session belong to that task, so "which task is this" is never inferred from
+a URL or a front tab: the app already knows, and it says so.
+
+`mountDrawer({ bridge, token, task, mount })` returns `{ element, setTask,
+destroy }`. Without a `token` the drawer asks for one and keeps it in
+localStorage. Add the app's origin to `origins` in `bridge.json` or the browser
+will refuse the calls.
+
+Try it at `/demo`: a pretend BasicOps with three tasks, mounting the same
+module the real app would.
+
+Transcripts are kept in memory per task, so switching away and back shows the
+conversation again. A page reload loses them: the bridge streams turns, it
+doesn't store them. The durable record belongs in the task thread, which is the
+next piece.
+
 ## Protocol
 
 | Call | Does |
 |------|------|
-| `GET /` | the test panel |
+| `GET /` | the raw protocol tester |
+| `GET /demo`, `/drawer.js` | the drawer, and a pretend app to switch tasks in |
 | `GET /state?task=` | `{ workdir, sessionId, busy, pending }` |
 | `GET /events?task=` | SSE: `text`, `tool`, `ask`, `bound`, `turn` |
 | `POST /bind` | `{ task, workdir }` bind the task's folder |

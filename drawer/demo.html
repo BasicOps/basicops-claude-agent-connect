@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawer demo</title>
+    <style>
+      :root { color-scheme: light dark; --bg: #fff; --fg: #16181d; --muted: #6b7280; --line: #e4e6eb; --card: #f6f7f9; --accent: #2f6feb; }
+      @media (prefers-color-scheme: dark) {
+        :root { --bg: #15171c; --fg: #e8eaed; --muted: #9aa1ad; --line: #2a2e36; --card: #1d2026; --accent: #7aa2f7; }
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; height: 100vh; display: flex; background: var(--bg); color: var(--fg);
+             font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+      .app { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .topbar { padding: 10px 16px; border-bottom: 1px solid var(--line); font-weight: 600; }
+      .main { flex: 1; display: flex; min-height: 0; }
+      .tasks { width: 240px; border-right: 1px solid var(--line); padding: 10px; overflow-y: auto; }
+      .tasks h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 6px 6px 8px; }
+      .task { padding: 8px 10px; border-radius: 7px; cursor: pointer; }
+      .task:hover { background: var(--card); }
+      .task.on { background: var(--accent); color: #fff; }
+      .task .id { font-size: 11px; opacity: .7; }
+      .detail { flex: 1; padding: 24px; color: var(--muted); min-width: 0; }
+      .detail h1 { color: var(--fg); font-size: 20px; margin: 0 0 6px; }
+      aside { width: 420px; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+      .note { position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="topbar">BasicOps (pretend)</div>
+      <div class="main">
+        <div class="tasks">
+          <h2>Tasks</h2>
+          <div id="list"></div>
+        </div>
+        <div class="detail">
+          <h1 id="tname">Pick a task</h1>
+          <div id="tdesc">The drawer on the right follows whichever task is open.</div>
+        </div>
+      </div>
+    </div>
+    <aside id="drawer"></aside>
+    <p class="note">Each task keeps its own Claude session and folder. Switching here calls <code>drawer.setTask(id)</code>.</p>
+
+    <script type="module">
+      import { mountDrawer } from "./drawer.js";
+
+      const TASKS = [
+        { id: "9001", name: "Fix the funnel watchdog" },
+        { id: "9002", name: "Write the release notes" },
+        { id: "9003", name: "Same folder as 9001 (collision test)" },
+      ];
+
+      const drawer = mountDrawer({
+        bridge: location.origin,
+        token: new URLSearchParams(location.search).get("t") || undefined,
+        mount: document.getElementById("drawer"),
+      });
+
+      const list = document.getElementById("list");
+      function openTask(t) {
+        for (const n of list.children) n.classList.toggle("on", n.dataset.id === t.id);
+        document.getElementById("tname").textContent = t.name;
+        document.getElementById("tdesc").textContent = "Task " + t.id;
+        // The whole contract between the app and the drawer:
+        drawer.setTask(t.id);
+      }
+      for (const t of TASKS) {
+        const n = document.createElement("div");
+        n.className = "task";
+        n.dataset.id = t.id;
+        n.innerHTML = `<div>${t.name}</div><div class="id">#${t.id}</div>`;
+        n.onclick = () => openTask(t);
+        list.append(n);
+      }
+      openTask(TASKS[0]);
+    </script>
+  </body>
+</html>

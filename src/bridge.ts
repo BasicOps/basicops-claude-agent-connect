@@ -7,7 +7,8 @@
  * restarts. Switching tasks in the app is just a different task id on the wire,
  * so the session that answers switches with it, with nothing inferred.
  *
- *   GET  /                      the test panel
+ *   GET  /                      the raw protocol tester
+ *   GET  /demo, /drawer.js      the drawer, and a pretend app to switch tasks in
  *   GET  /state?task=&t=        { workdir, sessionId, busy }
  *   GET  /events?task=&t=       SSE: text, tool, ask, turn, error
  *   POST /bind                  { task, workdir }      bind the task's folder
@@ -42,7 +43,18 @@ import { PersistedMap, sessionExists } from "./state.js";
 const CONFIG_DIR = join(homedir(), ".config", "basicops-agent");
 const CONFIG_PATH = join(CONFIG_DIR, "bridge.json");
 const SESSIONS_PATH = join(CONFIG_DIR, "bridge.sessions.json");
-const PANEL = join(dirname(fileURLToPath(import.meta.url)), "..", "panel", "index.html");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const HTML = "text/html; charset=utf-8";
+/**
+ * `/` is the raw protocol tester. `/demo` is a pretend BasicOps with a task
+ * list, so you can watch the session follow the task you click; it mounts the
+ * same drawer.js the real app would.
+ */
+const STATIC: Record<string, { path: string; type: string }> = {
+  "/": { path: "panel/index.html", type: HTML },
+  "/demo": { path: "drawer/demo.html", type: HTML },
+  "/drawer.js": { path: "drawer/drawer.js", type: "text/javascript; charset=utf-8" },
+};
 
 /** The only tools a drawer turn can reach at all. */
 const CODING_TOOLS = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep", "LS", "TodoWrite", "NotebookEdit", "WebFetch", "WebSearch"];
@@ -313,14 +325,14 @@ export async function startBridge(): Promise<number> {
       return res.end();
     }
 
-    if (url.pathname === "/" && req.method === "GET") {
-      // The panel is public; it can do nothing without the token you paste in.
+    // Static files are public: they can do nothing without a token.
+    const file = STATIC[url.pathname];
+    if (file && req.method === "GET") {
       try {
-        const html = readFileSync(PANEL, "utf8");
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        return res.end(html);
+        res.writeHead(200, { "Content-Type": file.type });
+        return res.end(readFileSync(join(ROOT, file.path), "utf8"));
       } catch {
-        return json(500, { error: `panel not found at ${PANEL}` });
+        return json(500, { error: `${file.path} not found under ${ROOT}` });
       }
     }
 
@@ -437,6 +449,7 @@ export async function startBridge(): Promise<number> {
     server.listen(port, "127.0.0.1", () => {
       console.log(`[bridge] listening on http://127.0.0.1:${port}`);
       console.log(`[bridge] panel:  http://127.0.0.1:${port}/?t=${cfg.token}`);
+      console.log(`[bridge] drawer: http://127.0.0.1:${port}/demo?t=${cfg.token}`);
       console.log(`[bridge] claude:  ${claudePath}`);
       console.log(`[bridge] folders: ${allowedDirs.length ? allowedDirs.join(", ") : "(any, set allowedDirs in bridge.json to fence it)"}`);
       console.log(`[bridge] bound tasks: ${bindings.size || "none yet"}`);

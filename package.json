@@ -12,7 +12,8 @@
     "plugins",
     "README.md",
     "DEPLOY.md",
-    "panel"
+    "panel",
+    "drawer"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/bin.js",
