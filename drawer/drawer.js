@@ -35,7 +35,7 @@ const CSS = `
 }
 .head { padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .head .title { font-weight: 600; }
-.head .meta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.head .meta { color: var(--muted); font-size: 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .head .dot.busy { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
@@ -77,6 +77,8 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   const dot = el("span", "dot");
   const title = el("span", "title", "Claude");
   const meta = el("span", "meta", "No task");
+  meta.title = "Click to change this task's folder";
+  meta.onclick = () => current && auth && bindPrompt();
   head.append(dot, title, meta);
   const body = el("div", "body");
   const foot = el("div", "foot");
@@ -204,20 +206,28 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     }
   }
 
-  /** No folder yet: ask for one here rather than making them type a command. */
+  /**
+   * Ask for the task's folder, rather than making them type a command. Also
+   * reachable from the header, since a task bound to the wrong folder would
+   * otherwise be stuck there.
+   */
   function bindPrompt() {
     if (root.querySelector(".bindrow")) return;
     const wrap = el("div", "bar bindrow");
     const path = el("input");
     path.placeholder = "/Users/you/src/the-repo";
-    path.value = localStorage.getItem("bo-drawer-lastdir") || "";
+    path.value = state.workdir || localStorage.getItem("bo-drawer-lastdir") || "";
     const go = el("button", "primary", "Bind folder");
     go.onclick = async () => {
       go.disabled = true;
       try {
-        await post("/bind", { workdir: path.value.trim() });
+        const before = state.workdir;
+        const after = await post("/bind", { workdir: path.value.trim() });
         localStorage.setItem("bo-drawer-lastdir", path.value.trim());
         wrap.remove();
+        // Moving the folder means a new session: the old transcript lives under
+        // the old path and can't be resumed from here.
+        if (before && after.workdir !== before) row("note", "Folder changed, so this task starts a new session.");
         refresh();
       } catch (e) {
         row("err", e.message);
