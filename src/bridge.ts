@@ -367,7 +367,9 @@ export async function startBridge(): Promise<number> {
       set.add(res);
       clients.set(task, set);
       const keepalive = setInterval(() => res.write(`: ping\n\n`), 25_000);
-      console.log(`[bridge] panel watching task ${task} (${set.size} open)`);
+      // Saying where the watcher came from makes it obvious whether the side
+      // panel is talking (chrome-extension://…) or a leftover tab is.
+      console.log(`[bridge] watching task ${task} from ${origin ?? "unknown"} (${set.size} open)`);
       req.on("close", () => {
         clearInterval(keepalive);
         set.delete(res);
