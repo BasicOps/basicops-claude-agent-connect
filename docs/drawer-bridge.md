@@ -137,12 +137,21 @@ Two reasons it exists rather than pasting `inject.js` into the page:
 - **It can reach the bridge.** An extension page is not a public origin, so
   Chrome's local network block does not apply and the panel can hold an
   `EventSource` open to `http://127.0.0.1:4710` directly. No tunnel.
-- **It gets a better answer to "which task".** A content script runs at
-  `document_start` in the page's own world and patches `fetch`/`XHR` before the
-  app loads. When BasicOps opens a task it GETs `/v1/task/<id>`, and the reply
-  carries the title, so the id comes from what the app actually did rather than
-  from a URL format that contradicts itself. The URL parser is still there as a
-  fallback for a tab that was already on a task before the script loaded.
+- **It can read the task.** A content script runs at `document_start` in the
+  page's own world and patches `fetch`/`XHR` before the app loads, so it sees
+  every `/v1/task/<id>` reply go past, title and description included. Those go
+  to `/context` and into the turn's system prompt.
+
+The split that matters, and that I got backwards at first:
+
+> **The URL says which task is open. The API says what that task contains.**
+
+A feed or a list fetches many tasks, so the last task the app fetched is just
+the last row that loaded, not the one you are looking at. Taking the id from a
+fetch pinned the drawer to whichever task loaded first and then never moved.
+The URL decides the id, every time it changes; the fetches only fill in details
+for ids already seen. If no URL rule matches, no task is open: showing nothing
+is safe in a way that showing a plausible wrong task is not.
 
 ### Load it
 

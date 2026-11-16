@@ -1,41 +1,47 @@
 /**
- * Runs in the extension's world, so it can reach `chrome.runtime`. It takes
- * what `watch-main.js` saw the app do and passes it to the background worker,
- * which hands it to the side panel.
+ * Works out which task is on screen, and tells the worker when it changes.
  *
- * The app's own API call is the signal we trust. The URL is only a fallback,
- * for a tab that was already sitting on a task before this loaded, since then
- * no fetch happens for us to see.
+ * The split that matters, which I had backwards at first:
+ *
+ *   The URL says WHICH task is open. The API says WHAT that task contains.
+ *
+ * A feed or a list fetches many tasks, so "the last task the app fetched" is
+ * not the task you are looking at; it is just the last row that loaded. Taking
+ * the id from a fetch meant the drawer pinned whichever task happened to load
+ * first and then never moved, because once it had an id it stopped listening.
+ *
+ * So the URL decides the id, every time it changes, and the fetches only fill
+ * in the title and description for ids we have seen go past.
  */
 (() => {
-  let current = null;
-  let name = "";
-  let description = "";
+  /** id -> { title, description }, from whatever the app has fetched. */
+  const details = new Map();
+  let sentId = null;
+  let sentText = null;
 
-  function send(id, label, desc) {
-    if (id === current && label === name && (desc || "") === description) return;
-    current = id;
-    name = label || "";
-    description = desc || "";
+  function push(id) {
+    const d = (id && details.get(id)) || { title: "", description: "" };
+    const text = d.title + "\u0000" + d.description;
+    if (id === sentId && text === sentText) return;
+    sentId = id;
+    sentText = text;
     try {
-      chrome.runtime.sendMessage({ type: "bo-task", id, name, description });
+      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description });
     } catch {
-      // The extension was reloaded. The next message will reconnect.
+      // The extension was reloaded; the next change reconnects.
     }
   }
 
-  window.addEventListener("message", (ev) => {
-    // Only our own page, and only our own shape.
-    if (ev.source !== window || ev.origin !== location.origin) return;
-    const d = ev.data;
-    if (!d || d.__boDrawer !== true || !d.id) return;
-    send(String(d.id), d.name, d.description);
-  });
-
   /**
-   * Last resort, when we never saw the app fetch anything. The three URL shapes
-   * BasicOps uses, in the only order that is ever right: the overlay is what is
-   * actually on screen, and the path disagrees with it.
+   * The open task's id. BasicOps has three URL shapes and they disagree, so
+   * the order is the whole point:
+   *
+   *  1. A task open over something else: `?ol-…/3936.2219964/…`. The path still
+   *     names the list or feed's own task and so does the page title, so
+   *     anything reading the path here is simply wrong.
+   *  2. A plain task route: `/list/l2221666/…`.
+   *  3. A share link: `?l=_<ws>_31C_<token>`, the id in base 36 with six more
+   *     characters after it.
    */
   function taskFromUrl() {
     const overlay = location.href.match(/[?&]ol-[^#]*?\/3936\.(\d+)/);
@@ -56,26 +62,49 @@
     return null;
   }
 
-  // Give the app a moment to fetch; only guess from the URL if it didn't.
-  let guessed = null;
-  function fallback() {
-    const id = taskFromUrl();
-    if (!id || id === guessed) return;
-    guessed = id;
-    if (!current) send(id, "", "");
+  /**
+   * What is open right now. If the URL says nothing, nothing is open. Falling
+   * back to "the last task the app fetched" is how the drawer ended up pinned
+   * to a random row of a feed, and showing no task is safe in a way that
+   * showing the wrong one is not.
+   */
+  const openTask = () => taskFromUrl();
+
+  function sync() {
+    push(openTask());
   }
-  setInterval(fallback, 700);
-  setTimeout(fallback, 1200);
+
+  // Details arriving from the page's own traffic.
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window || ev.origin !== location.origin) return;
+    const d = ev.data;
+    if (!d || d.__boDrawer !== true || !d.id) return;
+    const id = String(d.id);
+    if (d.title || d.description) {
+      details.set(id, { title: d.title || "", description: d.description || "" });
+    }
+    // Only re-send if this is the task actually on screen. A feed loading
+    // fifty rows must not drag the drawer along with it.
+    if (id === openTask()) push(id);
+  });
+
+  // The app routes without reloading, so watch the URL rather than trust an
+  // event. 400ms is below noticing and costs nothing.
+  addEventListener("popstate", sync);
+  addEventListener("hashchange", sync);
+  setInterval(sync, 400);
+  sync();
 
   /**
    * The worker asks this when the side panel needs to know, which is the only
-   * reliable moment: the worker is killed when idle and the page is not going
-   * to announce itself again. If no API call was seen, fall back to the URL.
+   * reliable moment: an MV3 worker is killed when idle and the page has no
+   * reason to announce itself again.
    */
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg?.type !== "bo-task-ask") return;
-    const id = current ?? taskFromUrl();
-    reply(id === current ? { id, name, description } : { id, name: "", description: "" });
+    const id = openTask();
+    const d = (id && details.get(id)) || { title: "", description: "" };
+    reply({ id, name: d.title, description: d.description });
     return true;
   });
 })();

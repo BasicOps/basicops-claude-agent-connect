@@ -27,7 +27,8 @@ async function recall(tabId) {
 async function askTab(tabId) {
   try {
     const res = await chrome.tabs.sendMessage(tabId, { type: "bo-task-ask" });
-    return res?.id ? { id: String(res.id), name: res.name || "", description: res.description || "" } : null;
+    if (!res) return null;
+    return { id: res.id == null ? null : String(res.id), name: res.name || "", description: res.description || "" };
   } catch {
     // No content script in that tab: not a BasicOps page, or not loaded yet.
     return null;
@@ -36,7 +37,9 @@ async function askTab(tabId) {
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === "bo-task" && sender.tab?.id != null) {
-    const task = { id: String(msg.id), name: msg.name || "", description: msg.description || "" };
+    // A null id is a real answer: no task is open. Stringifying it here is
+    // how the drawer ended up asking the bridge about a task called "null".
+    const task = { id: msg.id == null ? null : String(msg.id), name: msg.name || "", description: msg.description || "" };
     remember(sender.tab.id, task);
     chrome.runtime.sendMessage({ type: "bo-task-changed", tabId: sender.tab.id, ...task }).catch(() => {});
     return;
