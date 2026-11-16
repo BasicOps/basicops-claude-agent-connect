@@ -124,8 +124,26 @@
    */
   const openTask = () => taskFromUrl();
 
+  // The last sample, so a reading has to hold still before we act on it.
+  let lastSample = null;
+
+  /**
+   * Report only what the page has settled on.
+   *
+   * Opening the side panel reflows the page, and a reflowing app can show the
+   * list's own task for a moment before it settles on the one you had open.
+   * Latching onto that moment is how the drawer ends up on a task you were not
+   * looking at. Requiring two readings in a row, 400ms apart, costs nothing
+   * you would notice and skips the transient.
+   */
   function sync() {
-    push(openTask());
+    const id = openTask();
+    const sample = id + "\u0000" + titleFromDom();
+    if (sample !== lastSample) {
+      lastSample = sample;
+      return; // seen once; act on it if it is still true next tick
+    }
+    push(id);
   }
 
   // Details arriving from the page's own traffic.

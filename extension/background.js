@@ -137,7 +137,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) return reply({ tabId: null, id: null, name: "", description: "", parents: [], trail: [] });
       const answered = await askTab(tab.id);
-      const fresh = answered ?? (await recall(tab.id));
+      // On a BasicOps page with no answer, the watcher is gone. Remembering
+      // what that tab used to show would put a stale task in the drawer and
+      // leave it there, which is worse than showing none and saying why.
+      const stale = (await stranded(tab)) ? null : await recall(tab.id);
+      const fresh = answered ?? stale;
       if (fresh) await remember(tab.id, fresh);
       reply({
         tabId: tab.id,
