@@ -64,4 +64,16 @@
   }
   setInterval(fallback, 700);
   setTimeout(fallback, 1200);
+
+  /**
+   * The worker asks this when the side panel needs to know, which is the only
+   * reliable moment: the worker is killed when idle and the page is not going
+   * to announce itself again. If no API call was seen, fall back to the URL.
+   */
+  chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+    if (msg?.type !== "bo-task-ask") return;
+    const id = current ?? taskFromUrl();
+    reply({ id, name: id === current ? name : "" });
+    return true;
+  });
 })();

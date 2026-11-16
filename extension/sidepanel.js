@@ -14,6 +14,7 @@ const BRIDGE = (await chrome.storage.local.get("bridge")).bridge || "http://127.
 const drawer = mountDrawer({ bridge: BRIDGE, mount: document.getElementById("drawer") });
 
 let shownTab = null;
+let shownTask = null;
 
 async function activeTabId() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -25,6 +26,7 @@ async function refresh() {
   const res = await chrome.runtime.sendMessage({ type: "bo-task-get" }).catch(() => null);
   if (!res) return;
   shownTab = res.tabId;
+  shownTask = res.id;
   drawer.setTask(res.id, res.name);
 }
 
@@ -34,8 +36,16 @@ chrome.runtime.onMessage.addListener(async (msg) => {
   const active = await activeTabId();
   if (msg.tabId !== active) return;
   shownTab = msg.tabId;
+  shownTask = msg.id;
   drawer.setTask(msg.id, msg.name);
 });
 
 chrome.tabs.onActivated.addListener(refresh);
+// The panel can open before the page is ready to answer, and a worker that
+// was asleep answers nothing the first time. Keep asking until there is a
+// task, then stop; after that the page pushes changes.
+setInterval(() => {
+  if (!shownTask) refresh();
+}, 1500);
+window.addEventListener("focus", refresh);
 refresh();

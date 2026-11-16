@@ -260,7 +260,12 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       if (!auth) return;
       localStorage.setItem("bo-drawer-token", auth);
       wrap.remove();
-      if (current) setTask(current);
+      // setTask does nothing when handed the task it already has, so clear it
+      // first. Otherwise connecting leaves the drawer sitting on a task it
+      // never opened a stream for.
+      const again = current;
+      current = null;
+      if (again) setTask(again);
     };
     wrap.append(t, go);
     // Without this the panel just says "Not connected" and offers a box with
