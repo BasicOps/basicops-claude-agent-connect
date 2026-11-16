@@ -69,6 +69,8 @@ next piece.
 | `GET /state?task=` | `{ workdir, sessionId, busy, pending }` |
 | `GET /events?task=` | SSE: `text`, `tool`, `ask`, `bound`, `turn` |
 | `POST /bind` | `{ task, workdir }` bind the task's folder |
+| `POST /context` | `{ task, title, description }` what the task says |
+| `POST /pick` | open a folder picker on the Mac, return the path |
 | `POST /message` | `{ task, text }` run a turn |
 | `POST /approve` | `{ task, id, allow }` answer an approval |
 | `POST /reset` | `{ task }` forget the session, keep the folder |
@@ -112,6 +114,16 @@ later on the stream.
   to copy for anything reachable.
 - **Nothing is posted into BasicOps.** A turn here leaves no record in the task
   thread yet.
+- **The agent reads the task from your screen, not from BasicOps.** The bridge
+  has no BasicOps credentials and the CLI's own connectors may be signed into
+  the wrong workspace entirely, so whoever mounts the drawer sends the title
+  and description to `/context` and the system prompt carries them. It is
+  marked as a copy that may be stale, because it is one.
+- **`settingSources: []` does not fence connectors.** It stops your `~/.claude`
+  settings loading, but the CLI's claude.ai connectors still reach the turn, so
+  a turn can have BasicOps, Gmail or Drive tools. Each one comes back to the
+  drawer as an approval, so nothing runs unseen, but the folder fence covers
+  files and a connector is not a file.
 - **Watch the per-turn cost.** It is reported on each `turn done` event, and the
   first turn of a session is dearer than it looks.
 

@@ -134,6 +134,46 @@ function findClaude(configured?: string): string | undefined {
   }
 }
 
+/**
+ * BasicOps descriptions are HTML. The agent wants the words, not the markup,
+ * and a system prompt is no place for a stray `<script>` either. Capped,
+ * because a long task should not crowd out the conversation.
+ */
+function plainText(html: string, limit = 4000): string {
+  const text = html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return text.length > limit ? text.slice(0, limit) + "\n… (truncated)" : text;
+}
+
+/**
+ * The task itself, for the system prompt. Marked as a copy, because it is one:
+ * it was read from the operator's screen, not from BasicOps, so it can be out
+ * of date and the agent should say so rather than trust it blindly.
+ */
+function taskBrief(ctx?: { title: string; description: string }): string {
+  if (!ctx || (!ctx.title && !ctx.description)) return "";
+  const parts = ["\n\nThis is what the task says, copied from the operator's screen:"];
+  if (ctx.title) parts.push(`\nTitle: ${ctx.title}`);
+  if (ctx.description) parts.push(`\n\n${ctx.description}`);
+  parts.push(
+    `\n\nThat is a copy and may be out of date, so treat it as the brief rather than the record. ` +
+      `You do not need to go looking for this task elsewhere.`,
+  );
+  return parts.join("");
+}
+
 /** A real, existing directory, or a reason it won't do. */
 function checkDir(raw: unknown): { dir: string } | { error: string } {
   if (typeof raw !== "string" || !raw.trim()) return { error: "Give a folder path." };
@@ -166,6 +206,10 @@ export async function startBridge(): Promise<number> {
   }
   const bindings = new PersistedMap<Binding>(SESSIONS_PATH);
   const runs = new Map<string, Run>();
+  // What each task says, as the drawer's page already has it on screen. Not
+  // persisted: the page re-sends it every time it opens a task, and a stale
+  // description would be worse than none.
+  const context = new Map<string, { title: string; description: string }>();
   const clients = new Map<string, Set<http.ServerResponse>>();
 
   // The real app is allowed by default; anything else goes in `origins`.
@@ -253,7 +297,8 @@ export async function startBridge(): Promise<number> {
             append:
               `You are answering in a drawer beside BasicOps task ${task}. The folder \`${bound.workdir}\` on this Mac is that task's workspace. ` +
               `Do the work there, then reply with a short summary of what you changed and what you ran. ` +
-              `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.`,
+              `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.` +
+              taskBrief(context.get(task)),
           },
           maxTurns: 60,
           pathToClaudeCodeExecutable: claudePath,
@@ -436,6 +481,21 @@ export async function startBridge(): Promise<number> {
       });
       if (!chosen.path) return json(chosen.error ? 500 : 200, chosen.error ? { error: chosen.error } : { workdir: null });
       return json(200, { workdir: chosen.path });
+    }
+
+    /**
+     * What the task says, from whoever mounted the drawer. They have the task
+     * on screen and the credentials to read it; the bridge has neither.
+     */
+    if (url.pathname === "/context") {
+      const title = typeof payload.title === "string" ? payload.title.trim() : "";
+      const description = typeof payload.description === "string" ? plainText(payload.description) : "";
+      if (!title && !description) {
+        context.delete(id);
+        return json(200, { task: id, context: null });
+      }
+      context.set(id, { title, description });
+      return json(200, { task: id, context: { title, description: description.length } });
     }
 
     if (url.pathname === "/bind") {

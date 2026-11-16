@@ -15,18 +15,23 @@
   // Exactly /v1/task/<digits>, not an attachment or any other sub-resource.
   const TASK = /\/v1\/task\/(\d+)(?:[?#]|$)/;
 
-  function report(id, name) {
-    window.postMessage({ __boDrawer: true, id: String(id), name: name || "" }, "*");
+  function report(id, task) {
+    window.postMessage({ __boDrawer: true, id: String(id), name: task?.title || "", description: task?.description || "" }, "*");
   }
 
-  /** Pull the title out of a task reply, whatever shape it comes in. */
-  function titleOf(body) {
+  /**
+   * Pull the title and description out of a task reply, whatever shape it
+   * comes in. The description is what makes the drawer useful: without it the
+   * agent knows a task number and nothing about the task.
+   */
+  function taskOf(body) {
     try {
       const t = typeof body === "string" ? JSON.parse(body) : body;
       const o = t && t.data ? t.data : t;
-      return (o && (o.title || o.name)) || "";
+      if (!o) return null;
+      return { title: o.title || o.name || "", description: o.description || "" };
     } catch {
-      return "";
+      return null;
     }
   }
 
@@ -40,12 +45,12 @@
       if (hit) {
         out
           .then((res) => {
-            if (!res || !res.ok) return report(hit[1], "");
+            if (!res || !res.ok) return report(hit[1], null);
             res
               .clone()
               .json()
-              .then((b) => report(hit[1], titleOf(b)))
-              .catch(() => report(hit[1], ""));
+              .then((b) => report(hit[1], taskOf(b)))
+              .catch(() => report(hit[1], null));
           })
           .catch(() => {});
       }
@@ -58,7 +63,7 @@
     const hit = String(method || "GET").toUpperCase() === "GET" && url && String(url).match(TASK);
     if (hit) {
       this.addEventListener("load", () => {
-        report(hit[1], this.responseType === "" || this.responseType === "text" ? titleOf(this.responseText) : "");
+        report(hit[1], this.responseType === "" || this.responseType === "text" ? taskOf(this.responseText) : null);
       });
     }
     return origOpen.apply(this, arguments);

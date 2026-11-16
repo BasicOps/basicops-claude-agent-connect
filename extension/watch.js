@@ -10,13 +10,15 @@
 (() => {
   let current = null;
   let name = "";
+  let description = "";
 
-  function send(id, label) {
-    if (id === current && label === name) return;
+  function send(id, label, desc) {
+    if (id === current && label === name && (desc || "") === description) return;
     current = id;
     name = label || "";
+    description = desc || "";
     try {
-      chrome.runtime.sendMessage({ type: "bo-task", id, name });
+      chrome.runtime.sendMessage({ type: "bo-task", id, name, description });
     } catch {
       // The extension was reloaded. The next message will reconnect.
     }
@@ -27,7 +29,7 @@
     if (ev.source !== window || ev.origin !== location.origin) return;
     const d = ev.data;
     if (!d || d.__boDrawer !== true || !d.id) return;
-    send(String(d.id), d.name);
+    send(String(d.id), d.name, d.description);
   });
 
   /**
@@ -60,7 +62,7 @@
     const id = taskFromUrl();
     if (!id || id === guessed) return;
     guessed = id;
-    if (!current) send(id, "");
+    if (!current) send(id, "", "");
   }
   setInterval(fallback, 700);
   setTimeout(fallback, 1200);
@@ -73,7 +75,7 @@
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg?.type !== "bo-task-ask") return;
     const id = current ?? taskFromUrl();
-    reply({ id, name: id === current ? name : "" });
+    reply(id === current ? { id, name, description } : { id, name: "", description: "" });
     return true;
   });
 })();

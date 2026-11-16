@@ -27,7 +27,7 @@ async function recall(tabId) {
 async function askTab(tabId) {
   try {
     const res = await chrome.tabs.sendMessage(tabId, { type: "bo-task-ask" });
-    return res?.id ? { id: String(res.id), name: res.name || "" } : null;
+    return res?.id ? { id: String(res.id), name: res.name || "", description: res.description || "" } : null;
   } catch {
     // No content script in that tab: not a BasicOps page, or not loaded yet.
     return null;
@@ -36,7 +36,7 @@ async function askTab(tabId) {
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === "bo-task" && sender.tab?.id != null) {
-    const task = { id: String(msg.id), name: msg.name || "" };
+    const task = { id: String(msg.id), name: msg.name || "", description: msg.description || "" };
     remember(sender.tab.id, task);
     chrome.runtime.sendMessage({ type: "bo-task-changed", tabId: sender.tab.id, ...task }).catch(() => {});
     return;
@@ -45,10 +45,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === "bo-task-get") {
     (async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) return reply({ tabId: null, id: null, name: "" });
+      if (!tab?.id) return reply({ tabId: null, id: null, name: "", description: "" });
       const fresh = (await askTab(tab.id)) ?? (await recall(tab.id));
       if (fresh) await remember(tab.id, fresh);
-      reply({ tabId: tab.id, id: fresh?.id ?? null, name: fresh?.name ?? "" });
+      reply({ tabId: tab.id, id: fresh?.id ?? null, name: fresh?.name ?? "", description: fresh?.description ?? "" });
     })();
     return true; // the reply comes later
   }
@@ -57,6 +57,6 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(KEY(tabId)));
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  const task = (await askTab(tabId)) ?? (await recall(tabId)) ?? { id: null, name: "" };
+  const task = (await askTab(tabId)) ?? (await recall(tabId)) ?? { id: null, name: "", description: "" };
   chrome.runtime.sendMessage({ type: "bo-task-changed", tabId, ...task }).catch(() => {});
 });

@@ -27,7 +27,7 @@ async function refresh() {
   if (!res) return;
   shownTab = res.tabId;
   shownTask = res.id;
-  drawer.setTask(res.id, res.name);
+  drawer.setTask(res.id, res.name, res.description);
 }
 
 chrome.runtime.onMessage.addListener(async (msg) => {
@@ -37,7 +37,7 @@ chrome.runtime.onMessage.addListener(async (msg) => {
   if (msg.tabId !== active) return;
   shownTab = msg.tabId;
   shownTask = msg.id;
-  drawer.setTask(msg.id, msg.name);
+  drawer.setTask(msg.id, msg.name, msg.description);
 });
 
 chrome.tabs.onActivated.addListener(refresh);

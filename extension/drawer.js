@@ -337,10 +337,31 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     };
   }
 
-  function setTask(id, name) {
+  /**
+   * Tell the bridge what the task actually says, so a turn opens knowing it.
+   * Without this the agent gets a task number and nothing else, and has to go
+   * looking for the task through some connector that may not even reach the
+   * right workspace. Whoever mounts the drawer already has this text on screen.
+   */
+  const shared = new Map(); // task id -> what we last sent
+  async function shareContext(name, description) {
+    if (!current || !auth) return;
+    const text = (name || "") + "\u0000" + (description || "");
+    if (!name && !description) return;
+    if (shared.get(current) === text) return;
+    shared.set(current, text);
+    try {
+      await post("/context", { title: name || "", description: description || "" });
+    } catch {
+      // Context is a nicety. Losing it must never stop the drawer working.
+    }
+  }
+
+  function setTask(id, name, description) {
     id = id == null ? null : String(id);
     if (id === current) {
       if (name) label.textContent = name;
+      shareContext(name, description);
       return;
     }
     label.textContent = name || "";
@@ -368,6 +389,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       else row(e.kind, e.text, false);
     }
     if (!(history.get(id) ?? []).length) body.append(el("div", "empty", "Nothing yet for this task."));
+    shareContext(name, description);
     open();
     refresh();
   }
