@@ -14,6 +14,10 @@
  * in the title and description for ids we have seen go past.
  */
 (() => {
+  // Injected again after an extension reload? One watcher is enough.
+  if (window.__boWatch) return;
+  window.__boWatch = true;
+
   /** id -> { title, description }, from whatever the app has fetched. */
   const details = new Map();
   let sentId = null;

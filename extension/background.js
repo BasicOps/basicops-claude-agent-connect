@@ -14,7 +14,6 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   // Off everywhere by default; `offer` turns it on for BasicOps tabs only.
   chrome.sidePanel.setOptions({ enabled: false }).catch(() => {});
-  adopt();
 });
 
 /**
@@ -47,6 +46,13 @@ async function adopt() {
 
 // Also after a browser restart, where tabs are restored without us.
 chrome.runtime.onStartup.addListener(adopt);
+
+// And on every worker start. `onInstalled` does not fire when you reload an
+// unpacked extension, which is exactly when the open tabs have just been
+// stranded, so hanging the re-injection off it fixed nothing. The worker
+// always starts; the content scripts refuse to run twice, so this is safe to
+// repeat.
+adopt();
 
 /** A BasicOps tab, the only place this drawer means anything. */
 function basicops(url) {

@@ -10,6 +10,7 @@
     "scripting"
   ],
   "host_permissions": [
+    "https://*.basicops.com/*",
     "http://127.0.0.1:4710/*",
     "http://localhost:4710/*"
   ],

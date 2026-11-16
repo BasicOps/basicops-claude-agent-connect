@@ -13,6 +13,10 @@
  * and no text behind it.
  */
 (() => {
+  // Patching fetch and the socket twice would double every report.
+  if (window.__boWatchMain) return;
+  window.__boWatchMain = true;
+
   const SEEN = new Set(); // ids already reported, to keep the chatter down
   const MAX_NODES = 4000; // a feed reply is big; walking it must stay cheap
 
