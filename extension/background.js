@@ -30,8 +30,25 @@ async function askTab(tabId) {
     if (!res) return null;
     return { id: res.id == null ? null : String(res.id), name: res.name || "", description: res.description || "" };
   } catch {
-    // No content script in that tab: not a BasicOps page, or not loaded yet.
+    // No content script answering: not a BasicOps page, not loaded yet, or
+    // orphaned. See `stranded` for why the last one needs saying out loud.
     return null;
+  }
+}
+
+/**
+ * Reloading the extension kills the content scripts already running in open
+ * tabs, and Chrome does not put them back. The old script stays in the page
+ * with a dead `chrome.runtime`, so it fails silently for ever and the panel
+ * simply stops following the task with nothing to show for it. That looks
+ * exactly like a bug in the drawer, so say what it is instead.
+ */
+async function stranded(tab) {
+  if (!tab?.url) return false;
+  try {
+    return new URL(tab.url).hostname.endsWith(".basicops.com");
+  } catch {
+    return false;
   }
 }
 
@@ -49,9 +66,16 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     (async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) return reply({ tabId: null, id: null, name: "", description: "" });
-      const fresh = (await askTab(tab.id)) ?? (await recall(tab.id));
+      const answered = await askTab(tab.id);
+      const fresh = answered ?? (await recall(tab.id));
       if (fresh) await remember(tab.id, fresh);
-      reply({ tabId: tab.id, id: fresh?.id ?? null, name: fresh?.name ?? "", description: fresh?.description ?? "" });
+      reply({
+        tabId: tab.id,
+        id: fresh?.id ?? null,
+        name: fresh?.name ?? "",
+        description: fresh?.description ?? "",
+        needsReload: !answered && (await stranded(tab)),
+      });
     })();
     return true; // the reply comes later
   }

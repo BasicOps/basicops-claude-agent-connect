@@ -8,10 +8,14 @@
       html, body { margin: 0; height: 100%; }
       body { display: flex; flex-direction: column; }
       #drawer { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-      .idle { padding: 16px; font: 13px/1.5 ui-sans-serif, -apple-system, sans-serif; color: #6b7280; }
+      #notice { display: none; padding: 10px 12px; font: 13px/1.45 ui-sans-serif, -apple-system, sans-serif;
+                background: #fff4e5; color: #7a4a00; border-bottom: 1px solid #f0d8b0; }
+      #notice button { margin-left: 6px; font: inherit; cursor: pointer; }
+      @media (prefers-color-scheme: dark) { #notice { background: #3a2d14; color: #f0c674; border-bottom-color: #55431d; } }
     </style>
   </head>
   <body>
+    <div id="notice">This tab's watcher was stopped when the extension reloaded, so the drawer can't see which task is open.<button id="reload">Reload the tab</button></div>
     <div id="drawer"></div>
     <script type="module" src="sidepanel.js"></script>
   </body>

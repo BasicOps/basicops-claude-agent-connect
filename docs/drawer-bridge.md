@@ -153,6 +153,12 @@ The URL decides the id, every time it changes; the fetches only fill in details
 for ids already seen. If no URL rule matches, no task is open: showing nothing
 is safe in a way that showing a plausible wrong task is not.
 
+**Reloading the extension strands open tabs.** Chrome kills the content
+scripts already running and does not put them back, so the old script sits in
+the page with a dead `chrome.runtime` and fails silently for ever: the drawer
+just stops following the task. Always reload the BasicOps tab too. The panel
+now notices this and says so, with a button to reload the tab.
+
 ### Load it
 
 1. `npm run bridge` (leave it running)
