@@ -31,16 +31,32 @@
     return text.length > 200 ? text.slice(0, 200) : text;
   }
 
+  /**
+   * The ancestors shown above the task, outermost first, by name.
+   *
+   * The overlay stack only has a parent when you opened the child ON TOP of
+   * it. Walk down the task tree instead and the URL names one task, with no
+   * chain at all, which is how a subtask ended up with no folder. The
+   * breadcrumb is on screen either way. It carries no ids, only names, so the
+   * bridge matches them against the task names it has already been told.
+   */
+  function trailFromDom() {
+    return [...document.querySelectorAll(".breadcrumb .breadcrumb-link")]
+      .map((el) => (el.textContent || "").trim())
+      .filter((s) => s && s.length <= 200);
+  }
+
   function push(id) {
     const d = (id && details.get(id)) || { title: "", description: "" };
     if (!d.title) d.title = titleFromDom();
     const parents = id ? parentsFromUrl() : [];
-    const text = d.title + "\u0000" + d.description + "\u0000" + parents.join(",");
+    const trail = id ? trailFromDom() : [];
+    const text = d.title + "\u0000" + d.description + "\u0000" + parents.join(",") + "\u0000" + trail.join(">");
     if (id === sentId && text === sentText) return;
     sentId = id;
     sentText = text;
     try {
-      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description, parents });
+      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description, parents, trail });
     } catch {
       // The extension was reloaded; the next change reconnects.
     }
@@ -138,7 +154,13 @@
     if (msg?.type !== "bo-task-ask") return;
     const id = openTask();
     const d = (id && details.get(id)) || { title: "", description: "" };
-    reply({ id, name: d.title, description: d.description, parents: id ? parentsFromUrl() : [] });
+    reply({
+      id,
+      name: d.title || titleFromDom(),
+      description: d.description,
+      parents: id ? parentsFromUrl() : [],
+      trail: id ? trailFromDom() : [],
+    });
     return true;
   });
 })();

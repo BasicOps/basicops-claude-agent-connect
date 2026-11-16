@@ -46,6 +46,9 @@ import { PersistedMap, sessionExists } from "./state.js";
 const CONFIG_DIR = join(homedir(), ".config", "basicops-agent");
 const CONFIG_PATH = join(CONFIG_DIR, "bridge.json");
 const SESSIONS_PATH = join(CONFIG_DIR, "bridge.sessions.json");
+// Task names, kept across restarts so a subtask can still find its parent by
+// breadcrumb after the bridge has been restarted.
+const NAMES_PATH = join(CONFIG_DIR, "bridge.names.json");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = "text/html; charset=utf-8";
 /**
@@ -285,6 +288,19 @@ export async function startBridge(): Promise<number> {
   // A task's ancestors, nearest parent first, as the open overlay stack has
   // them. Not persisted: the page re-sends it whenever a task is opened.
   const parents = new Map<string, string[]>();
+  // The same chain by name, from the breadcrumb, for when the URL has no
+  // overlay stack to read (walking down the task tree gives none).
+  const trails = new Map<string, string[]>();
+
+  const names = new PersistedMap<string>(NAMES_PATH);
+
+  /** The id of a task we have been told the name of. Most recent wins. */
+  const idNamed = (want: string): string | undefined => {
+    const w = want.trim().toLowerCase();
+    let found: string | undefined;
+    for (const [id, title] of names) if (title.trim().toLowerCase() === w) found = id;
+    return found;
+  };
 
   /**
    * The folder a task works in. Its own binding if it has one, otherwise the
@@ -295,9 +311,17 @@ export async function startBridge(): Promise<number> {
   const boundFor = (id: string): (Binding & { inheritedFrom?: string }) | undefined => {
     const own = bindings.get(id);
     if (own?.workdir) return own;
+    // Ancestors by id (the overlay stack), nearest first.
     for (const up of parents.get(id) ?? []) {
       const anc = bindings.get(up);
       if (anc?.workdir) return { workdir: anc.workdir, sessionId: own?.sessionId, inheritedFrom: up };
+    }
+    // Then by name (the breadcrumb), nearest first. The breadcrumb has no ids,
+    // so this only finds an ancestor the drawer has already seen by name.
+    for (const name of [...(trails.get(id) ?? [])].reverse()) {
+      const up = idNamed(name);
+      const anc = up ? bindings.get(up) : undefined;
+      if (up && anc?.workdir) return { workdir: anc.workdir, sessionId: own?.sessionId, inheritedFrom: up };
     }
     return own;
   };
@@ -575,6 +599,7 @@ export async function startBridge(): Promise<number> {
           workdir: b?.workdir ?? null,
           inheritedFrom: b?.inheritedFrom ?? null,
           parents: parents.get(task) ?? [],
+          trail: trails.get(task) ?? [],
           sessionId: b?.sessionId ?? null,
           busy: !!run,
           // So a drawer that was closed mid-turn can show the prompt it missed.
@@ -630,6 +655,11 @@ export async function startBridge(): Promise<number> {
         if (chain.length) parents.set(id, chain);
         else parents.delete(id);
       }
+      if (Array.isArray(payload.trail)) {
+        const names = payload.trail.filter((x: unknown) => typeof x === "string" && x.trim()) as string[];
+        if (names.length) trails.set(id, names);
+        else trails.delete(id);
+      }
       const title = typeof payload.title === "string" ? payload.title.trim() : "";
       const description = typeof payload.description === "string" ? plainText(payload.description) : "";
       if (!title && !description) {
@@ -637,6 +667,7 @@ export async function startBridge(): Promise<number> {
         return json(200, { task: id, context: null, parents: parents.get(id) ?? [] });
       }
       context.set(id, { title, description });
+      if (title && names.get(id) !== title) names.set(id, title);
       console.log(`[bridge] task ${id} is "${title}" (${description.length} chars of description)`);
       return json(200, { task: id, context: { title, description: description.length } });
     }

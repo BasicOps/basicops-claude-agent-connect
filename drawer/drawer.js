@@ -346,15 +346,16 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
    * right workspace. Whoever mounts the drawer already has this text on screen.
    */
   const shared = new Map(); // task id -> what we last sent
-  async function shareContext(name, description, parents) {
+  async function shareContext(name, description, lineage) {
     if (!current || !auth) return;
-    const chain = parents ?? [];
-    const text = (name || "") + "\u0000" + (description || "") + "\u0000" + chain.join(",");
-    if (!name && !description && !chain.length) return;
+    const chain = lineage?.parents ?? [];
+    const trail = lineage?.trail ?? [];
+    const text = [name || "", description || "", chain.join(","), trail.join(">")].join("\u0000");
+    if (!name && !description && !chain.length && !trail.length) return;
     if (shared.get(current) === text) return;
     shared.set(current, text);
     try {
-      await post("/context", { title: name || "", description: description || "", parents: chain });
+      await post("/context", { title: name || "", description: description || "", parents: chain, trail });
     } catch {
       // Context is a nicety. Losing it must never stop the drawer working.
     }
@@ -367,11 +368,11 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     label.textContent = "";
   }
 
-  function setTask(id, name, description, parents) {
+  function setTask(id, name, description, lineage) {
     id = id == null ? null : String(id);
     if (id === current) {
       if (name) setHeading(id, name);
-      shareContext(name, description, parents);
+      shareContext(name, description, lineage);
       return;
     }
     setHeading(id, name);
@@ -399,7 +400,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       else row(e.kind, e.text, false);
     }
     if (!(history.get(id) ?? []).length) body.append(el("div", "empty", "Nothing yet for this task."));
-    shareContext(name, description, parents);
+    shareContext(name, description, lineage);
     open();
     refresh();
   }

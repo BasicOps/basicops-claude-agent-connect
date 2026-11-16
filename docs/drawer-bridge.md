@@ -71,12 +71,23 @@ worse than one that asks.
 
 ### Subtasks
 
-A subtask with no folder of its own works in its parent's. The open overlay
-stack carries the whole chain (`?ol-…/3936.<parent>/…/3936.<child>/…`), so the
-drawer sends it with the task and the bridge walks up to the nearest bound
-ancestor. The session is still the subtask's own, so it gets its own thread in
-the same checkout, and the header says `(from #<parent>)`. Binding the subtask
-directly overrides it.
+A subtask with no folder of its own works in its parent's. The session is
+still the subtask's own, so it gets its own thread in the same checkout, and
+the header says `(from #<parent>)`. Binding the subtask directly overrides it.
+
+Finding the parent takes two routes, because neither covers everything:
+
+1. **The overlay stack**, `?ol-…/3936.<parent>/…/3936.<child>/…`, when you
+   opened the child on top of its parent. Ids, so exact.
+2. **The breadcrumb**, `.breadcrumb .breadcrumb-link`. Walk down the task tree
+   instead and the URL names one task with no chain at all, which is how a
+   subtask ended up with no folder. The breadcrumb is there either way, but it
+   carries only names, so the bridge matches them against task names it has
+   been told. It knows a task's name once you have opened it; `bridge.names.json`
+   keeps that across restarts.
+
+The API does not help here: `get_task` returns the project, not the parent
+task, so the parent can only be found from what is on screen.
 
 ### The task's name
 
@@ -228,11 +239,12 @@ The URL decides the id, every time it changes; the fetches only fill in details
 for ids already seen. If no URL rule matches, no task is open: showing nothing
 is safe in a way that showing a plausible wrong task is not.
 
-**Reloading the extension strands open tabs.** Chrome kills the content
-scripts already running and does not put them back, so the old script sits in
-the page with a dead `chrome.runtime` and fails silently for ever: the drawer
-just stops following the task. Always reload the BasicOps tab too. The panel
-now notices this and says so, with a button to reload the tab.
+**Reloading the extension no longer means reloading your tabs.** Chrome kills
+the content scripts already running and does not put them back, which left the
+drawer deaf until you reloaded the tab and threw away whatever you were looking
+at. The worker now injects them again into open BasicOps tabs on install and on
+browser startup, so the panel picks up the task you already have open. The
+"reload the tab" notice stays as a fallback for when that fails.
 
 ### Load it
 

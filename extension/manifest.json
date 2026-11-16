@@ -6,7 +6,8 @@
   "permissions": [
     "sidePanel",
     "storage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "http://127.0.0.1:4710/*",
