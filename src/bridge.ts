@@ -163,7 +163,15 @@ function plainText(html: string, limit = 4000): string {
  * of date and the agent should say so rather than trust it blindly.
  */
 function taskBrief(ctx?: { title: string; description: string }): string {
-  if (!ctx || (!ctx.title && !ctx.description)) return "";
+  if (!ctx || (!ctx.title && !ctx.description)) {
+    // Left to itself the agent goes looking through whatever connectors it
+    // has, which here means a BasicOps signed into the wrong workspace, five
+    // approval prompts, and a dead end. Asking is quicker and honest.
+    return (
+      `\n\nYou have not been given the text of this task, only its number. ` +
+      `Do not go looking for it through connectors or the web: the operator is right there, so ask them what it says.`
+    );
+  }
   const parts = ["\n\nThis is what the task says, copied from the operator's screen:"];
   if (ctx.title) parts.push(`\nTitle: ${ctx.title}`);
   if (ctx.description) parts.push(`\n\n${ctx.description}`);
@@ -495,6 +503,7 @@ export async function startBridge(): Promise<number> {
         return json(200, { task: id, context: null });
       }
       context.set(id, { title, description });
+      console.log(`[bridge] task ${id} is "${title}" (${description.length} chars of description)`);
       return json(200, { task: id, context: { title, description: description.length } });
     }
 
