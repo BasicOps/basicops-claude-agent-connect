@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type PermissionResult, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { connectorsForTurn } from "./connectors.js";
 import { expandHome, fenceHook, fenceRoots } from "./fence.js";
 import { PersistedMap, sessionExists } from "./state.js";
 
@@ -81,6 +82,17 @@ type BridgeConfig = {
   allowedDirs?: string[];
   /** Browser origins allowed to call the bridge (the drawer's page). */
   origins?: string[];
+  /**
+   * claude.ai connectors this drawer may use, by name, e.g. ["BasicOps"].
+   *
+   * Empty (the default) denies every one of them. They belong to the Claude
+   * account the bridge runs as, and that account can be signed into a
+   * different workspace than the task you are looking at: a turn that reaches
+   * for the wrong BasicOps gets "access denied" and an agent that goes hunting
+   * instead of working. The task's own text arrives on `/context`, so there is
+   * usually nothing to fetch.
+   */
+  claudeAiConnectors?: string[];
   /**
    * Claude Code binary to drive. Default: `claude` on PATH. The SDK's own
    * bundled CLI (2.0.77) cannot complete a permission round-trip: it answers
@@ -205,6 +217,11 @@ export async function startBridge(): Promise<number> {
   const cfg = loadConfig();
   const port = cfg.port ?? 4710;
   const allowedDirs = (cfg.allowedDirs ?? []).map((d) => resolve(expandHome(d)));
+  // Which claude.ai connectors a turn may touch. Empty denies them all: the
+  // hook refuses any `mcp__claude_ai_*` tool outside this list, so a connector
+  // signed into the wrong workspace cannot be reached at all.
+  const connectors = cfg.claudeAiConnectors ?? [];
+  const conn = connectorsForTurn(connectors, false);
   const claudePath = findClaude(cfg.claudePath);
   if (!claudePath) {
     throw new Error(
@@ -286,7 +303,7 @@ export async function startBridge(): Promise<number> {
           tools: CODING_TOOLS,
           allowedTools: AUTO_OK,
           disallowedTools: BLOCKED_TOOLS,
-          hooks: { PreToolUse: [{ hooks: [fence] }] },
+          hooks: { PreToolUse: [{ hooks: [fence, conn.hook] }] },
           canUseTool: async (name, input, { signal, toolUseID }) => {
             return new Promise<PermissionResult>((settle) => {
               const id = toolUseID || randomUUID();
@@ -306,14 +323,18 @@ export async function startBridge(): Promise<number> {
               `You are answering in a drawer beside BasicOps task ${task}. The folder \`${bound.workdir}\` on this Mac is that task's workspace. ` +
               `Do the work there, then reply with a short summary of what you changed and what you ran. ` +
               `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.` +
-              taskBrief(context.get(task)),
+              taskBrief(context.get(task)) +
+              (connectors.length ? `\n\n${conn.prompt}` : ""),
           },
           maxTurns: 60,
           pathToClaudeCodeExecutable: claudePath,
           // Load no Claude Code settings. Otherwise the operator's own
           // ~/.claude allowlist decides what runs unprompted, and a tool they
-          // allowed themselves long ago would never reach the drawer's approval.
-          settingSources: [],
+          // allowed themselves long ago would never reach the drawer's
+          // approval. `--setting-sources` also stops claude.ai connectors
+          // loading at all, so when some are allowed we pass the env instead
+          // and let the hook do the gating.
+          ...(connectors.length ? { env: conn.env } : { settingSources: [] as [] }),
           stderr: (d: string) => {
             const line = d.trim();
             if (line) console.error(`  [claude stderr] ${line}`);
@@ -575,6 +596,9 @@ export async function startBridge(): Promise<number> {
       console.log(`[bridge] drawer: http://127.0.0.1:${port}/demo?t=${cfg.token}`);
       console.log(`[bridge] claude:  ${claudePath}`);
       console.log(`[bridge] folders: ${allowedDirs.length ? allowedDirs.join(", ") : "(any, set allowedDirs in bridge.json to fence it)"}`);
+      console.log(
+        `[bridge] connectors: ${connectors.length ? connectors.join(", ") : "(none, every claude.ai connector is denied)"}`,
+      );
       console.log(`[bridge] bound tasks: ${bindings.size || "none yet"}`);
       res(port);
     });

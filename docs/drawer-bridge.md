@@ -28,6 +28,7 @@ and prints the panel URL. Open it, paste a task id and a folder, and talk.
 | `allowedDirs` | Folders a turn may touch. Empty means any folder, which is not what you want once this is real. |
 | `origins` | Browser origins allowed to call the bridge, e.g. `https://app.basicops.com`. |
 | `claudePath` | Claude Code binary. Default: `claude` on PATH. |
+| `claudeAiConnectors` | claude.ai connectors a turn may use, by name. Empty (the default) denies every one. |
 
 ## Putting the drawer in the app
 
@@ -119,11 +120,22 @@ later on the stream.
   the wrong workspace entirely, so whoever mounts the drawer sends the title
   and description to `/context` and the system prompt carries them. It is
   marked as a copy that may be stale, because it is one.
-- **`settingSources: []` does not fence connectors.** It stops your `~/.claude`
-  settings loading, but the CLI's claude.ai connectors still reach the turn, so
-  a turn can have BasicOps, Gmail or Drive tools. Each one comes back to the
-  drawer as an approval, so nothing runs unseen, but the folder fence covers
-  files and a connector is not a file.
+- **claude.ai connectors are denied unless you name them.** `settingSources: []`
+  does not fence them: the CLI loads every connector on the account anyway. So
+  the bridge reuses the listener's `connectorsForTurn` hook, and with
+  `claudeAiConnectors` empty (the default) any `mcp__claude_ai_*` tool is
+  refused outright.
+
+  This matters more than it looks. The connectors belong to the Claude account
+  the bridge runs as, and that account can be signed into a different workspace
+  than the task on your screen. A turn bound to a Taskflow task reached for a
+  BasicOps connector signed into another workspace, got "access denied", and
+  spent five approval prompts finding that out. The task's own text arrives on
+  `/context`, so there is usually nothing to fetch in the first place.
+
+  To allow one, name it as it appears in its tool names:
+  `mcp__claude_ai_BasicOps_-_MarinGrade__get_task` is the connector
+  `"BasicOps - MarinGrade"`.
 - **Watch the per-turn cost.** It is reported on each `turn done` event, and the
   first turn of a session is dearer than it looks.
 
