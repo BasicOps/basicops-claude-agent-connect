@@ -138,9 +138,13 @@ Two reasons it exists rather than pasting `inject.js` into the page:
   Chrome's local network block does not apply and the panel can hold an
   `EventSource` open to `http://127.0.0.1:4710` directly. No tunnel.
 - **It can read the task.** A content script runs at `document_start` in the
-  page's own world and patches `fetch`/`XHR` before the app loads, so it sees
-  every `/v1/task/<id>` reply go past, title and description included. Those go
-  to `/context` and into the turn's system prompt.
+  page's own world and patches `fetch`/`XHR` before the app loads, then
+  harvests any task-shaped object out of any JSON the app receives. Matching
+  only `/v1/task/<id>` was too narrow: open a task from a feed or a list and
+  its text has usually already arrived inside some larger reply. Title and
+  description go to `/context` and into the turn's system prompt. When the
+  bridge has no text for a task it says so in the prompt, and tells the agent
+  to ask rather than go hunting through connectors.
 
 The split that matters, and that I got backwards at first:
 

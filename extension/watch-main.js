@@ -1,56 +1,95 @@
 /**
- * Runs in the page's own world, before the app's bundle loads.
+ * Runs in the page's own world, before the app's bundle loads, and listens to
+ * what the app fetches.
  *
- * The URL does not reliably say which task is open: with a task over a list the
- * path names the list's task and so does the title. So instead of reading the
- * URL, listen to what the app itself does. When BasicOps opens a task it GETs
- * `/v1/task/<id>`, and the reply carries the title. That is the app telling us
- * which task it opened, in its own words, and it is the best signal available
- * without changing the app.
+ * It does NOT decide which task is open: the URL does that, in `watch.js`.
+ * All this does is collect what tasks SAY, so the drawer can hand the agent a
+ * brief instead of a number.
  *
- * Nothing here talks to the bridge or to the extension directly: the page's
- * world has no `chrome` API. It posts to `watch.js`, which does.
+ * It used to match only `/v1/task/<id>`, which turned out to be rare: open a
+ * task from a feed or a list and the text has usually arrived already, inside
+ * some larger reply. So it now harvests any task-shaped object out of any JSON
+ * the app receives, which is where the titles were all along.
  */
 (() => {
-  // Exactly /v1/task/<digits>, not an attachment or any other sub-resource.
-  const TASK = /\/v1\/task\/(\d+)(?:[?#]|$)/;
+  const SEEN = new Set(); // ids already reported, to keep the chatter down
+  const MAX_NODES = 4000; // a feed reply is big; walking it must stay cheap
 
-  function report(id, task) {
-    window.postMessage({ __boDrawer: true, id: String(id), name: task?.title || "", description: task?.description || "" }, "*");
+  function report(id, title, description) {
+    // The field is `title`, matching what watch.js reads. It was `name` once,
+    // and the mismatch quietly threw every description away.
+    window.postMessage({ __boDrawer: true, id: String(id), title: title || "", description: description || "" }, "*");
   }
 
-  /**
-   * Pull the title and description out of a task reply, whatever shape it
-   * comes in. The description is what makes the drawer useful: without it the
-   * agent knows a task number and nothing about the task.
-   */
-  function taskOf(body) {
+  /** Does this look like a task, rather than a user, project or comment? */
+  function taskish(o) {
+    if (!o || typeof o !== "object") return false;
+    const id = o.id ?? o.taskId;
+    if (typeof id !== "number" && !(typeof id === "string" && /^\d+$/.test(id))) return false;
+    // A task has a title. A project has one too, so require that the object
+    // is not obviously something else before trusting it.
+    if (typeof o.title !== "string" || !o.title.trim()) return false;
+    if (o.email || o.firstName || o.lastName) return false; // a person
+    return true;
+  }
+
+  /** Walk a reply and keep every task-shaped thing in it. */
+  function harvest(body) {
+    let budget = MAX_NODES;
+    const stack = [body];
+    while (stack.length && budget-- > 0) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object") continue;
+      if (Array.isArray(node)) {
+        for (const v of node) stack.push(v);
+        continue;
+      }
+      if (taskish(node)) {
+        const id = String(node.id ?? node.taskId);
+        const key = id + ":" + node.title + ":" + (node.description || "").length;
+        if (!SEEN.has(key)) {
+          SEEN.add(key);
+          report(id, node.title, typeof node.description === "string" ? node.description : "");
+        }
+      }
+      for (const v of Object.values(node)) {
+        if (v && typeof v === "object") stack.push(v);
+      }
+    }
+  }
+
+  function parse(text) {
     try {
-      const t = typeof body === "string" ? JSON.parse(body) : body;
-      const o = t && t.data ? t.data : t;
-      if (!o) return null;
-      return { title: o.title || o.name || "", description: o.description || "" };
+      return JSON.parse(text);
     } catch {
       return null;
     }
   }
 
+  const ours = (url) => {
+    try {
+      return new URL(String(url), location.href).hostname.endsWith("basicops.com");
+    } catch {
+      return false;
+    }
+  };
+
   const origFetch = window.fetch;
   if (typeof origFetch === "function") {
     window.fetch = function (input, init) {
       const url = typeof input === "string" ? input : input && input.url;
-      const method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
-      const hit = method === "GET" && url && String(url).match(TASK);
       const out = origFetch.apply(this, arguments);
-      if (hit) {
+      if (ours(url)) {
         out
           .then((res) => {
-            if (!res || !res.ok) return report(hit[1], null);
+            if (!res || !res.ok) return;
+            const type = res.headers?.get?.("content-type") || "";
+            if (!type.includes("json")) return;
             res
               .clone()
               .json()
-              .then((b) => report(hit[1], taskOf(b)))
-              .catch(() => report(hit[1], null));
+              .then(harvest)
+              .catch(() => {});
           })
           .catch(() => {});
       }
@@ -59,11 +98,12 @@
   }
 
   const origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url) {
-    const hit = String(method || "GET").toUpperCase() === "GET" && url && String(url).match(TASK);
-    if (hit) {
+  XMLHttpRequest.prototype.open = function (_method, url) {
+    if (ours(url)) {
       this.addEventListener("load", () => {
-        report(hit[1], this.responseType === "" || this.responseType === "text" ? taskOf(this.responseText) : null);
+        if (this.responseType !== "" && this.responseType !== "text" && this.responseType !== "json") return;
+        const body = this.responseType === "json" ? this.response : parse(this.responseText);
+        if (body) harvest(body);
       });
     }
     return origOpen.apply(this, arguments);
