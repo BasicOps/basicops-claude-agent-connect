@@ -6,10 +6,11 @@
  * All this does is collect what tasks SAY, so the drawer can hand the agent a
  * brief instead of a number.
  *
- * It used to match only `/v1/task/<id>`, which turned out to be rare: open a
- * task from a feed or a list and the text has usually arrived already, inside
- * some larger reply. So it now harvests any task-shaped object out of any JSON
- * the app receives, which is where the titles were all along.
+ * It watches the WebSocket, not just fetch and XHR. BasicOps is a jQuery app
+ * that talks over a socket: loading the dashboard makes seventy HTTP requests
+ * and none of them carries data. Matching `/v1/task/<id>` was looking at a
+ * transport the app does not use, which is why the drawer had a task number
+ * and no text behind it.
  */
 (() => {
   const SEEN = new Set(); // ids already reported, to keep the chatter down
@@ -95,6 +96,31 @@
       }
       return out;
     };
+  }
+
+  /**
+   * The one that actually matters here.
+   *
+   * BasicOps is a jQuery app that talks over a WebSocket: loading the
+   * dashboard makes seventy HTTP requests and not one of them carries data.
+   * So patching fetch and XHR found nothing, and the drawer kept handing the
+   * agent a task number with no text behind it. The frames are where the
+   * tasks are.
+   */
+  const OrigWS = window.WebSocket;
+  if (typeof OrigWS === "function") {
+    const Patched = function (...args) {
+      const sock = new OrigWS(...args);
+      sock.addEventListener("message", (ev) => {
+        if (typeof ev.data !== "string") return; // binary frames are not ours
+        const body = parse(ev.data);
+        if (body) harvest(body);
+      });
+      return sock;
+    };
+    Patched.prototype = OrigWS.prototype;
+    for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) Patched[k] = OrigWS[k];
+    window.WebSocket = Patched;
   }
 
   const origOpen = XMLHttpRequest.prototype.open;
