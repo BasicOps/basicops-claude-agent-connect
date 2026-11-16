@@ -30,6 +30,7 @@ and prints the panel URL. Open it, paste a task id and a folder, and talk.
 | `claudePath` | Claude Code binary. Default: `claude` on PATH. |
 | `claudeAiConnectors` | claude.ai connectors a turn may use, by name. Empty (the default) denies every one. |
 | `agent` | An agent whose capabilities the drawer takes on, e.g. `"roy-claude"`. |
+| `approvals` | Ask before every write and shell call. Default: true alone, false with `agent`. |
 
 ## Running as an agent
 
@@ -56,6 +57,33 @@ signed into another workspace, while the agent that owns that very folder had
 a `basicops-taskflow` MCP server pointed at the right one all along. An agent
 you have already configured is a better starting point than a fresh set of
 defaults.
+
+### Approvals
+
+Running as an agent means running the way that agent runs. Roy does not stop
+and ask before each tool call, so neither does a drawer matching it: the fence,
+the connector allowlist, the BasicOps read-only rule and the workplace lock do
+the gating, and they are hooks, which run whatever the permission mode. Set
+`"approvals": true` to get the per-call cards back.
+
+With no agent configured the drawer asks, because a drawer acting unseen is
+worse than one that asks.
+
+### Subtasks
+
+A subtask with no folder of its own works in its parent's. The open overlay
+stack carries the whole chain (`?ol-…/3936.<parent>/…/3936.<child>/…`), so the
+drawer sends it with the task and the bridge walks up to the nearest bound
+ancestor. The session is still the subtask's own, so it gets its own thread in
+the same checkout, and the header says `(from #<parent>)`. Binding the subtask
+directly overrides it.
+
+### The task's name
+
+The drawer shows the task's name, with its number as small print. The name is
+read from the page's one visible `.task-title`, which belongs to the task the
+URL names. Simpler than fishing it out of a socket frame, and it is the same
+text you are looking at, which is the point: a wrong task is visible.
 
 ## Putting the drawer in the app
 

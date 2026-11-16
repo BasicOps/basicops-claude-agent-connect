@@ -188,8 +188,10 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
 
   function paint() {
     const bits = [];
+    if (current) bits.push("#" + current);
     if (state.workdir) bits.push(state.workdir.split("/").slice(-2).join("/"));
     else bits.push("no folder bound");
+    if (state.inheritedFrom) bits[bits.length - 1] += " (from #" + state.inheritedFrom + ")";
     if (state.sessionId) bits.push("session " + state.sessionId.slice(0, 8));
     meta.textContent = bits.join(" · ");
     meta.title = state.workdir || "";
@@ -344,27 +346,35 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
    * right workspace. Whoever mounts the drawer already has this text on screen.
    */
   const shared = new Map(); // task id -> what we last sent
-  async function shareContext(name, description) {
+  async function shareContext(name, description, parents) {
     if (!current || !auth) return;
-    const text = (name || "") + "\u0000" + (description || "");
-    if (!name && !description) return;
+    const chain = parents ?? [];
+    const text = (name || "") + "\u0000" + (description || "") + "\u0000" + chain.join(",");
+    if (!name && !description && !chain.length) return;
     if (shared.get(current) === text) return;
     shared.set(current, text);
     try {
-      await post("/context", { title: name || "", description: description || "" });
+      await post("/context", { title: name || "", description: description || "", parents: chain });
     } catch {
       // Context is a nicety. Losing it must never stop the drawer working.
     }
   }
 
-  function setTask(id, name, description) {
+  /** The name is the heading; the number is small print beside the folder. */
+  function setHeading(id, name) {
+    title.textContent = name || (id ? "Task " + id : "Claude");
+    title.title = id ? "Task " + id : "";
+    label.textContent = "";
+  }
+
+  function setTask(id, name, description, parents) {
     id = id == null ? null : String(id);
     if (id === current) {
-      if (name) label.textContent = name;
-      shareContext(name, description);
+      if (name) setHeading(id, name);
+      shareContext(name, description, parents);
       return;
     }
-    label.textContent = name || "";
+    setHeading(id, name);
     current = id;
     typing = null;
     state = {};
@@ -372,7 +382,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     root.querySelector(".bindrow")?.remove();
     stream?.close();
     stream = null;
-    title.textContent = id ? "Task " + id : "Claude";
+
     if (!id) {
       meta.textContent = "No task";
       paint();
@@ -389,7 +399,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       else row(e.kind, e.text, false);
     }
     if (!(history.get(id) ?? []).length) body.append(el("div", "empty", "Nothing yet for this task."));
-    shareContext(name, description);
+    shareContext(name, description, parents);
     open();
     refresh();
   }

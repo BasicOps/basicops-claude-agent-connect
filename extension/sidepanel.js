@@ -34,7 +34,7 @@ async function refresh() {
   notice.style.display = res.needsReload ? "block" : "none";
   shownTab = res.tabId;
   shownTask = res.id;
-  drawer.setTask(res.id, res.name, res.description);
+  drawer.setTask(res.id, res.name, res.description, res.parents);
 }
 
 chrome.runtime.onMessage.addListener(async (msg) => {
@@ -45,7 +45,7 @@ chrome.runtime.onMessage.addListener(async (msg) => {
   notice.style.display = "none";
   shownTab = msg.tabId;
   shownTask = msg.id;
-  drawer.setTask(msg.id, msg.name, msg.description);
+  drawer.setTask(msg.id, msg.name, msg.description, msg.parents);
 });
 
 chrome.tabs.onActivated.addListener(refresh);

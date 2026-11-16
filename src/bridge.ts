@@ -109,6 +109,11 @@ type BridgeConfig = {
    */
   agent?: string;
   /**
+   * Stop and ask before every write and shell call. Default: true on its own,
+   * false when `agent` is set, since that agent doesn't ask either.
+   */
+  approvals?: boolean;
+  /**
    * Claude Code binary to drive. Default: `claude` on PATH. The SDK's own
    * bundled CLI (2.0.77) cannot complete a permission round-trip: it answers
    * with a duplicate tool_use id and exits 1, so every approval kills the turn.
@@ -243,6 +248,27 @@ export async function startBridge(): Promise<number> {
   // signed into the wrong workspace cannot be reached at all.
   const connectors = cfg.claudeAiConnectors ?? caps?.claudeAiConnectors ?? [];
   const conn = connectorsForTurn(connectors, false);
+  /**
+   * Does every write and shell call stop and wait for the operator?
+   *
+   * With no agent to match, yes: a drawer that acts unseen is worse than one
+   * that asks. Running as an agent, no, because that agent does not ask and
+   * the point of naming one is to behave like it. The fence, the connector
+   * allowlist, the read-only rule and the workplace lock still apply; they are
+   * hooks, and they run whatever the permission mode.
+   */
+  const ask = cfg.approvals ?? !caps;
+  /** The agent's own tool set: what the listener allows it, plus coding. */
+  const agentTools = [
+    "mcp__basicops",
+    "WebSearch",
+    "WebFetch",
+    ...Object.keys(caps?.mcpServers ?? {}).map((name) => `mcp__${name}`),
+    ...(caps?.plugins?.length ? ["Skill"] : []),
+    ...(caps?.allowedTools ?? []),
+    ...CODING_TOOLS,
+    ...(connectors.length ? conn.allowedTools : []),
+  ];
   const claudePath = findClaude(cfg.claudePath ?? caps?.claudeCodePath);
   if (!claudePath) {
     throw new Error(
@@ -256,6 +282,25 @@ export async function startBridge(): Promise<number> {
   // persisted: the page re-sends it every time it opens a task, and a stale
   // description would be worse than none.
   const context = new Map<string, { title: string; description: string }>();
+  // A task's ancestors, nearest parent first, as the open overlay stack has
+  // them. Not persisted: the page re-sends it whenever a task is opened.
+  const parents = new Map<string, string[]>();
+
+  /**
+   * The folder a task works in. Its own binding if it has one, otherwise the
+   * nearest ancestor's: a subtask belongs to its parent's folder until someone
+   * says otherwise. The session is still the task's own, so a subtask gets its
+   * own thread in the same checkout.
+   */
+  const boundFor = (id: string): (Binding & { inheritedFrom?: string }) | undefined => {
+    const own = bindings.get(id);
+    if (own?.workdir) return own;
+    for (const up of parents.get(id) ?? []) {
+      const anc = bindings.get(up);
+      if (anc?.workdir) return { workdir: anc.workdir, sessionId: own?.sessionId, inheritedFrom: up };
+    }
+    return own;
+  };
   const clients = new Map<string, Set<http.ServerResponse>>();
 
   // The real app is allowed by default; anything else goes in `origins`.
@@ -282,8 +327,8 @@ export async function startBridge(): Promise<number> {
    * that is about to refuse itself.
    */
   function blocked(task: string): string | undefined {
-    const bound = bindings.get(task);
-    if (!bound) return "This task has no folder yet. Bind one first.";
+    const bound = boundFor(task);
+    if (!bound?.workdir) return "This task has no folder yet. Bind one first.";
     if (runs.has(task)) return "This task is already working. Stop it or wait for it to finish.";
     // One session per folder at a time: two tasks editing the same checkout
     // would overwrite each other's work with no way to tell afterwards.
@@ -296,8 +341,9 @@ export async function startBridge(): Promise<number> {
   }
 
   async function runTurn(task: string, text: string) {
-    const bound = bindings.get(task)!;
+    const bound = boundFor(task)!;
     const abort = new AbortController();
+    if (bound.inheritedFrom) console.log(`[bridge] task ${task} works in ${bound.workdir} (its parent #${bound.inheritedFrom}'s folder)`);
     const pending = new Map<string, Pending>();
     runs.set(task, { abort, pending });
 
@@ -335,8 +381,14 @@ export async function startBridge(): Promise<number> {
           cwd: bound.workdir,
           abortController: abort,
           includePartialMessages: true,
-          tools: CODING_TOOLS,
-          allowedTools: [...AUTO_OK, ...(caps?.allowedTools ?? []), ...(connectors.length ? conn.allowedTools : [])],
+          // Running as an agent means running the way that agent runs: its whole
+          // tool set, allowed, behind the fence and the hooks. Approvals are
+          // the drawer's own idea, so they apply only when it has no agent to
+          // match (or `approvals: true` asks for them back).
+          ...(ask ? { tools: CODING_TOOLS } : {}),
+          allowedTools: ask
+            ? [...AUTO_OK, ...(caps?.allowedTools ?? []), ...(connectors.length ? conn.allowedTools : [])]
+            : agentTools,
           disallowedTools: BLOCKED_TOOLS,
           ...(caps?.mcpServers && Object.keys(caps.mcpServers).length ? { mcpServers: caps.mcpServers } : {}),
           ...(caps?.plugins?.length ? { plugins: caps.plugins } : {}),
@@ -344,25 +396,31 @@ export async function startBridge(): Promise<number> {
             PreToolUse: [{ hooks: preToolHooks }],
             ...(lock ? { PostToolUse: [{ hooks: [lock.post] }] } : {}),
           },
-          canUseTool: async (name, input, { signal, toolUseID }) => {
-            return new Promise<PermissionResult>((settle) => {
-              const id = toolUseID || randomUUID();
-              pending.set(id, { name, input, settle });
-              console.log(`  [bridge] waiting on ${name} (${id})`);
-              send(task, { type: "ask", id, name, input });
-              signal.addEventListener("abort", () => {
-                if (!pending.delete(id)) return;
-                settle({ behavior: "deny", message: "The operator stopped the turn.", interrupt: true });
-              });
-            });
-          },
+          ...(ask
+            ? {
+                canUseTool: async (name, input, { signal, toolUseID }) => {
+                  return new Promise<PermissionResult>((settle) => {
+                    const id = toolUseID || randomUUID();
+                    pending.set(id, { name, input, settle });
+                    console.log(`  [bridge] waiting on ${name} (${id})`);
+                    send(task, { type: "ask", id, name, input });
+                    signal.addEventListener("abort", () => {
+                      if (!pending.delete(id)) return;
+                      settle({ behavior: "deny", message: "The operator stopped the turn.", interrupt: true });
+                    });
+                  });
+                },
+              }
+            : { permissionMode: "bypassPermissions" as const }),
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
             append:
               `You are answering in a drawer beside BasicOps task ${task}. The folder \`${bound.workdir}\` on this Mac is that task's workspace. ` +
               `Do the work there, then reply with a short summary of what you changed and what you ran. ` +
-              `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.` +
+              (ask
+                ? `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.`
+                : `The operator is watching every tool call as you make it, so work in small, obvious steps.`) +
               taskBrief(context.get(task)) +
               // The agent's standing rules and its operator's instructions,
               // re-read every turn so the drawer follows the same vault the
@@ -387,7 +445,10 @@ export async function startBridge(): Promise<number> {
         },
       })) {
         const sid = (m as any).session_id;
-        if (sid && sid !== bindings.get(task)?.sessionId) bindings.set(task, { ...bound, sessionId: sid });
+        if (sid && sid !== bindings.get(task)?.sessionId) {
+          // The folder may be the parent's; the session is this task's own.
+          bindings.set(task, { workdir: bound.workdir, sessionId: sid });
+        }
 
         if (m.type === "stream_event") {
           const ev: any = (m as any).event;
@@ -507,11 +568,13 @@ export async function startBridge(): Promise<number> {
     if (req.method !== "POST") {
       if (url.pathname === "/state") {
         if (!task) return json(400, { error: "task is required" });
-        const b = bindings.get(task);
+        const b = boundFor(task);
         const run = runs.get(task);
         return json(200, {
           task,
           workdir: b?.workdir ?? null,
+          inheritedFrom: b?.inheritedFrom ?? null,
+          parents: parents.get(task) ?? [],
           sessionId: b?.sessionId ?? null,
           busy: !!run,
           // So a drawer that was closed mid-turn can show the prompt it missed.
@@ -562,11 +625,16 @@ export async function startBridge(): Promise<number> {
      * on screen and the credentials to read it; the bridge has neither.
      */
     if (url.pathname === "/context") {
+      if (Array.isArray(payload.parents)) {
+        const chain = payload.parents.filter((x: unknown) => typeof x === "string" && /^\d+$/.test(x)) as string[];
+        if (chain.length) parents.set(id, chain);
+        else parents.delete(id);
+      }
       const title = typeof payload.title === "string" ? payload.title.trim() : "";
       const description = typeof payload.description === "string" ? plainText(payload.description) : "";
       if (!title && !description) {
         context.delete(id);
-        return json(200, { task: id, context: null });
+        return json(200, { task: id, context: null, parents: parents.get(id) ?? [] });
       }
       context.set(id, { title, description });
       console.log(`[bridge] task ${id} is "${title}" (${description.length} chars of description)`);
@@ -650,6 +718,9 @@ export async function startBridge(): Promise<number> {
       }
       console.log(
         `[bridge] connectors: ${connectors.length ? connectors.join(", ") : "(none, every claude.ai connector is denied)"}`,
+      );
+      console.log(
+        `[bridge] approvals: ${ask ? "every write and shell call asks first" : "off, matching the agent (the fence and hooks still apply)"}`,
       );
       console.log(`[bridge] bound tasks: ${bindings.size || "none yet"}`);
       res(port);

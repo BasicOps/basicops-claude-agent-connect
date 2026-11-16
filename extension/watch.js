@@ -19,14 +19,28 @@
   let sentId = null;
   let sentText = null;
 
+  /**
+   * The open task's name, straight off the page. One `.task-title` is on
+   * screen at a time and it belongs to the task the URL names, so this is the
+   * same thing you are looking at. Simpler and more reliable than fishing the
+   * title out of a socket frame, and it is what the drawer shows you.
+   */
+  function titleFromDom() {
+    const el = document.querySelector(".task-title");
+    const text = el ? (el.textContent || "").trim() : "";
+    return text.length > 200 ? text.slice(0, 200) : text;
+  }
+
   function push(id) {
     const d = (id && details.get(id)) || { title: "", description: "" };
-    const text = d.title + "\u0000" + d.description;
+    if (!d.title) d.title = titleFromDom();
+    const parents = id ? parentsFromUrl() : [];
+    const text = d.title + "\u0000" + d.description + "\u0000" + parents.join(",");
     if (id === sentId && text === sentText) return;
     sentId = id;
     sentText = text;
     try {
-      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description });
+      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description, parents });
     } catch {
       // The extension was reloaded; the next change reconnects.
     }
@@ -43,11 +57,31 @@
    *  3. A share link: `?l=_<ws>_31C_<token>`, the id in base 36 with six more
    *     characters after it.
    */
+  /**
+   * Every task in the open overlay stack, outermost first. Opening a subtask
+   * from its parent leaves both in the `ol-` parameter, so this is the parent
+   * chain, already on screen and needing no API call.
+   */
+  function overlayStack() {
+    const ol = location.href.match(/[?&](ol-[^#&]*)/);
+    if (!ol) return [];
+    const ids = [...ol[1].matchAll(/\/3936\.(\d+)/g)].map((m) => m[1]);
+    return ids.filter((id, i) => id !== "0" && ids.indexOf(id) === i);
+  }
+
+  /** The open task's ancestors, nearest parent first. */
+  function parentsFromUrl() {
+    const stack = overlayStack();
+    return stack.slice(0, -1).reverse();
+  }
+
   function taskFromUrl() {
-    const overlay = location.href.match(/[?&]ol-[^#]*?\/3936\.(\d+)/);
-    if (overlay) return overlay[1];
+    const stack = overlayStack();
+    if (stack.length) return stack[stack.length - 1];
+    // `l0` is BasicOps's placeholder, not a task: the dashboard path is full
+    // of them. Without this the drawer binds to a task called 0.
     const route = location.pathname.match(/\/list\/l(\d+)\//);
-    if (route) return route[1];
+    if (route && route[1] !== "0") return route[1];
     const l = new URLSearchParams(location.search).get("l");
     if (l) {
       const parts = l.split("_").filter(Boolean);
@@ -104,7 +138,7 @@
     if (msg?.type !== "bo-task-ask") return;
     const id = openTask();
     const d = (id && details.get(id)) || { title: "", description: "" };
-    reply({ id, name: d.title, description: d.description });
+    reply({ id, name: d.title, description: d.description, parents: id ? parentsFromUrl() : [] });
     return true;
   });
 })();
