@@ -54,6 +54,8 @@ const CSS = `
 .ask pre { margin: 6px 0; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow: auto; }
 .foot { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.bar input { flex: 1; min-width: 0; }
+.bar .empty { flex-basis: 100%; }
 textarea, input { font: inherit; width: 100%; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px 9px; }
 textarea { resize: vertical; min-height: 60px; }
 button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 7px; padding: 7px 11px; cursor: pointer; }
@@ -261,6 +263,10 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       if (current) setTask(current);
     };
     wrap.append(t, go);
+    // Without this the panel just says "Not connected" and offers a box with
+    // no clue what belongs in it, which reads as the drawer being broken.
+    const hint = el("div", "empty", "The bridge prints this token when it starts. Paste it once; it is remembered.");
+    wrap.append(hint);
     foot.prepend(wrap);
   }
 
