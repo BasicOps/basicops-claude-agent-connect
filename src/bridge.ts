@@ -30,7 +30,7 @@
  * BasicOps task thread, so a turn here leaves no record in BasicOps yet.
  */
 import http from "node:http";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -137,7 +137,14 @@ function findClaude(configured?: string): string | undefined {
 /** A real, existing directory, or a reason it won't do. */
 function checkDir(raw: unknown): { dir: string } | { error: string } {
   if (typeof raw !== "string" || !raw.trim()) return { error: "Give a folder path." };
-  const dir = resolve(expandHome(raw.trim()));
+  // Quotes come along when a path is dragged in or copied from a terminal.
+  // Left in, the path stops being absolute and `resolve` silently hangs it off
+  // the bridge's own folder, which produces a baffling error further down.
+  const given = raw.trim().replace(/^['"]|['"]$/g, "").trim();
+  if (!given.startsWith("/") && !given.startsWith("~")) {
+    return { error: `Give the whole path, starting at /. "${given}" is relative.` };
+  }
+  const dir = resolve(expandHome(given));
   try {
     if (!statSync(dir).isDirectory()) return { error: `${dir} is not a folder.` };
   } catch {
@@ -403,6 +410,33 @@ export async function startBridge(): Promise<number> {
     }
     const id = String(payload.task ?? task ?? "");
     if (!id) return json(400, { error: "task is required" });
+
+    /**
+     * Open a real folder picker, on the Mac, and return what was chosen.
+     *
+     * A browser cannot do this: `showDirectoryPicker` hands back a handle with
+     * no path, and `webkitdirectory` gives relative names. But the bridge is
+     * already running on the machine whose folders we are choosing, so it can
+     * just ask macOS. The typed field stays for anyone whose bridge is not
+     * sitting in front of them.
+     */
+    if (url.pathname === "/pick") {
+      if (process.platform !== "darwin") return json(501, { error: "The picker is macOS only. Type the path instead." });
+      const chosen = await new Promise<{ path?: string; error?: string }>((done) => {
+        execFile(
+          "osascript",
+          ["-e", "activate", "-e", 'POSIX path of (choose folder with prompt "Folder for this task")'],
+          { timeout: 120_000 },
+          (err, stdout) => {
+            // Cancelling is not a failure, it just means no folder.
+            if (err) return done({ error: /canceled/i.test(String(err)) ? "" : "The picker didn't open." });
+            done({ path: stdout.trim().replace(/\/$/, "") });
+          },
+        );
+      });
+      if (!chosen.path) return json(chosen.error ? 500 : 200, chosen.error ? { error: chosen.error } : { workdir: null });
+      return json(200, { workdir: chosen.path });
+    }
 
     if (url.pathname === "/bind") {
       const checked = checkDir(payload.workdir);

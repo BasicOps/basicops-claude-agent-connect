@@ -227,13 +227,31 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     const path = el("input");
     path.placeholder = "/Users/you/src/the-repo";
     path.value = state.workdir || localStorage.getItem("bo-drawer-lastdir") || "";
+    // Dragging a folder in, or copying a path from a terminal, brings quotes
+    // with it. They are never part of the path, and left in they turn an
+    // absolute path into a relative one, which fails somewhere confusing.
+    const clean = () => path.value.trim().replace(/^['"]|['"]$/g, "").trim();
+
+    const pick = el("button", null, "Choose…");
+    pick.onclick = async () => {
+      pick.disabled = true;
+      try {
+        const got = await post("/pick", {});
+        if (got.workdir) path.value = got.workdir;
+      } catch (e) {
+        row("err", e.message);
+      }
+      pick.disabled = false;
+      path.focus();
+    };
+
     const go = el("button", "primary", "Bind folder");
     go.onclick = async () => {
       go.disabled = true;
       try {
         const before = state.workdir;
-        const after = await post("/bind", { workdir: path.value.trim() });
-        localStorage.setItem("bo-drawer-lastdir", path.value.trim());
+        const after = await post("/bind", { workdir: clean() });
+        localStorage.setItem("bo-drawer-lastdir", clean());
         wrap.remove();
         // Moving the folder means a new session: the old transcript lives under
         // the old path and can't be resumed from here.
@@ -244,7 +262,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
         go.disabled = false;
       }
     };
-    wrap.append(path, go);
+    wrap.append(path, pick, go);
     foot.prepend(wrap);
   }
 
