@@ -37,8 +37,10 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type PermissionResult, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { connectorsForTurn } from "./connectors.js";
-import { expandHome, fenceHook, fenceRoots } from "./fence.js";
+import { connectorPrefix, connectorsForTurn, resolveClaudeExecutable } from "./connectors.js";
+import { loadCapabilities } from "./config.js";
+import { basicopsReadOnlyHook, expandHome, fenceHook, fenceRoots, workplaceLock } from "./fence.js";
+import { RuleBook } from "./rules.js";
 import { PersistedMap, sessionExists } from "./state.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "basicops-agent");
@@ -93,6 +95,19 @@ type BridgeConfig = {
    * usually nothing to fetch.
    */
   claudeAiConnectors?: string[];
+  /**
+   * An agent whose capability config this drawer takes on, e.g. "roy-claude".
+   *
+   * The drawer then runs as that agent: its MCP servers, plugins, connector
+   * allowlist, standing rules, operator instructions and folder fence, all
+   * from `~/.config/basicops-agent/<agent>.json`. Without it the drawer is a
+   * parallel universe with its own rules, which is how it ended up reaching
+   * for a BasicOps signed into the wrong workspace while the agent that owns
+   * that folder had the right one configured all along.
+   *
+   * Keys set here win over the agent's, so the drawer can differ deliberately.
+   */
+  agent?: string;
   /**
    * Claude Code binary to drive. Default: `claude` on PATH. The SDK's own
    * bundled CLI (2.0.77) cannot complete a permission round-trip: it answers
@@ -216,13 +231,19 @@ function checkDir(raw: unknown): { dir: string } | { error: string } {
 export async function startBridge(): Promise<number> {
   const cfg = loadConfig();
   const port = cfg.port ?? 4710;
-  const allowedDirs = (cfg.allowedDirs ?? []).map((d) => resolve(expandHome(d)));
+  // The agent this drawer runs as, if any. Everything below prefers the
+  // bridge's own config where it is set, and falls back to the agent's.
+  const caps = cfg.agent ? loadCapabilities(cfg.agent) : undefined;
+  const rules = caps ? new RuleBook(caps.vault, caps.workplaceRules) : undefined;
+  // The fence. The agent's coding config already lists the folders it may
+  // touch, so a drawer running as that agent is fenced the same way.
+  const allowedDirs = (cfg.allowedDirs ?? caps?.coding?.allowedDirs ?? []).map((d) => resolve(expandHome(d)));
   // Which claude.ai connectors a turn may touch. Empty denies them all: the
   // hook refuses any `mcp__claude_ai_*` tool outside this list, so a connector
   // signed into the wrong workspace cannot be reached at all.
-  const connectors = cfg.claudeAiConnectors ?? [];
+  const connectors = cfg.claudeAiConnectors ?? caps?.claudeAiConnectors ?? [];
   const conn = connectorsForTurn(connectors, false);
-  const claudePath = findClaude(cfg.claudePath);
+  const claudePath = findClaude(cfg.claudePath ?? caps?.claudeCodePath);
   if (!claudePath) {
     throw new Error(
       "No Claude Code binary found. Install it (or set claudePath in " +
@@ -290,6 +311,20 @@ export async function startBridge(): Promise<number> {
     const roots = fenceRoots(allowedDirs.length ? [...allowedDirs, bound.workdir] : [bound.workdir], []);
     const fence = fenceHook(bound.workdir, roots, allowedDirs.length ? [...allowedDirs, bound.workdir] : [bound.workdir]);
 
+    // Writing as the operator in BasicOps only after the server proves which
+    // workplace it is actually pointed at. The whole mess today was a turn
+    // talking to the wrong workspace, so this is worth inheriting.
+    const ob = caps?.operatorBasicops;
+    const lock = ob
+      ? workplaceLock(ob.server ? `mcp__${ob.server}` : connectorPrefix(ob.connector!), ob.workplaceUrl, true)
+      : undefined;
+    const preToolHooks = [
+      fence,
+      conn.hook,
+      ...(caps?.basicopsReadOnly ? [basicopsReadOnlyHook] : []),
+      ...(lock ? [lock.pre] : []),
+    ];
+
     try {
       for await (const m of query({
         // Streaming input (a generator, not a string) is what lets the CLI emit
@@ -301,9 +336,14 @@ export async function startBridge(): Promise<number> {
           abortController: abort,
           includePartialMessages: true,
           tools: CODING_TOOLS,
-          allowedTools: AUTO_OK,
+          allowedTools: [...AUTO_OK, ...(caps?.allowedTools ?? []), ...(connectors.length ? conn.allowedTools : [])],
           disallowedTools: BLOCKED_TOOLS,
-          hooks: { PreToolUse: [{ hooks: [fence, conn.hook] }] },
+          ...(caps?.mcpServers && Object.keys(caps.mcpServers).length ? { mcpServers: caps.mcpServers } : {}),
+          ...(caps?.plugins?.length ? { plugins: caps.plugins } : {}),
+          hooks: {
+            PreToolUse: [{ hooks: preToolHooks }],
+            ...(lock ? { PostToolUse: [{ hooks: [lock.post] }] } : {}),
+          },
           canUseTool: async (name, input, { signal, toolUseID }) => {
             return new Promise<PermissionResult>((settle) => {
               const id = toolUseID || randomUUID();
@@ -324,6 +364,11 @@ export async function startBridge(): Promise<number> {
               `Do the work there, then reply with a short summary of what you changed and what you ran. ` +
               `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.` +
               taskBrief(context.get(task)) +
+              // The agent's standing rules and its operator's instructions,
+              // re-read every turn so the drawer follows the same vault the
+              // agent does without a restart.
+              (rules ? `\n\n${rules.build([])}` : "") +
+              (caps?.instructions ? `\n\n## Your operator's instructions\nFollow these unless they conflict with the rules above:\n${caps.instructions}` : "") +
               (connectors.length ? `\n\n${conn.prompt}` : ""),
           },
           maxTurns: 60,
@@ -596,6 +641,13 @@ export async function startBridge(): Promise<number> {
       console.log(`[bridge] drawer: http://127.0.0.1:${port}/demo?t=${cfg.token}`);
       console.log(`[bridge] claude:  ${claudePath}`);
       console.log(`[bridge] folders: ${allowedDirs.length ? allowedDirs.join(", ") : "(any, set allowedDirs in bridge.json to fence it)"}`);
+      console.log(`[bridge] agent: ${cfg.agent ?? "(none, the drawer has its own capabilities)"}`);
+      if (caps) {
+        const servers = Object.keys(caps.mcpServers ?? {});
+        console.log(`[bridge] mcp servers: ${servers.length ? servers.join(", ") : "none"}`);
+        console.log(`[bridge] plugins: ${caps.plugins?.length ? caps.plugins.map((pl) => pl.path).join(", ") : "none"}`);
+        if (caps.operatorBasicops) console.log(`[bridge] workplace: ${caps.operatorBasicops.workplaceUrl}`);
+      }
       console.log(
         `[bridge] connectors: ${connectors.length ? connectors.join(", ") : "(none, every claude.ai connector is denied)"}`,
       );

@@ -29,6 +29,33 @@ and prints the panel URL. Open it, paste a task id and a folder, and talk.
 | `origins` | Browser origins allowed to call the bridge, e.g. `https://app.basicops.com`. |
 | `claudePath` | Claude Code binary. Default: `claude` on PATH. |
 | `claudeAiConnectors` | claude.ai connectors a turn may use, by name. Empty (the default) denies every one. |
+| `agent` | An agent whose capabilities the drawer takes on, e.g. `"roy-claude"`. |
+
+## Running as an agent
+
+```json
+{ "agent": "roy-claude" }
+```
+
+The drawer then **is** that agent: its MCP servers, plugins, claude.ai
+connector allowlist, standing rules, operator instructions, folder fence,
+BasicOps read-only rule and workplace lock, all from
+`~/.config/basicops-agent/<agent>.json`. Anything set in `bridge.json` wins,
+so the drawer can differ deliberately.
+
+```
+[bridge] agent: roy-claude
+[bridge] mcp servers: basicops-taskflow, campaign-previewer
+[bridge] workplace: https://taskflow.basicops.com
+[bridge] connectors: Claude Docs, Google Docs, ... (no BasicOps among them)
+```
+
+This is worth more than it looks. Without it the drawer was a parallel
+universe with its own rules, reaching for a BasicOps claude.ai connector
+signed into another workspace, while the agent that owns that very folder had
+a `basicops-taskflow` MCP server pointed at the right one all along. An agent
+you have already configured is a better starting point than a fresh set of
+defaults.
 
 ## Putting the drawer in the app
 
