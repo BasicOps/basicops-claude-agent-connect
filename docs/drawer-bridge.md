@@ -38,11 +38,17 @@ and prints the panel URL. Open it, paste a task id and a folder, and talk.
 { "agent": "roy-claude" }
 ```
 
-The drawer then **is** that agent: its MCP servers, plugins, claude.ai
+The drawer then runs as that agent: its MCP servers, plugins, claude.ai
 connector allowlist, standing rules, operator instructions, folder fence,
 BasicOps read-only rule and workplace lock, all from
 `~/.config/basicops-agent/<agent>.json`. Anything set in `bridge.json` wins,
 so the drawer can differ deliberately.
+
+**Based on the agent, not dependent on it.** The folder fence starts from the
+agent's list and is the drawer's own from there. Bind a task to a folder
+outside it and the drawer asks whether to add it, keeping it in
+`bridge.allowed.json`. The agent's config is never edited, so a folder a task
+needed once does not widen what the agent may touch on every run of its own.
 
 ```
 [bridge] agent: roy-claude
@@ -138,6 +144,7 @@ next piece.
 | `POST /bind` | `{ task, workdir }` bind the task's folder |
 | `POST /context` | `{ task, title, description }` what the task says |
 | `POST /pick` | open a folder picker on the Mac, return the path |
+| `POST /allow` | `{ workdir }` add a folder to the drawer's own fence |
 | `POST /message` | `{ task, text }` run a turn |
 | `POST /approve` | `{ task, id, allow }` answer an approval |
 | `POST /reset` | `{ task }` forget the session, keep the folder |

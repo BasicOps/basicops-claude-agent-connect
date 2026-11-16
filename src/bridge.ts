@@ -49,6 +49,10 @@ const SESSIONS_PATH = join(CONFIG_DIR, "bridge.sessions.json");
 // Task names, kept across restarts so a subtask can still find its parent by
 // breadcrumb after the bridge has been restarted.
 const NAMES_PATH = join(CONFIG_DIR, "bridge.names.json");
+// Folders the operator has added from the drawer. The drawer starts from the
+// agent's folders; it does not borrow the agent's list, so adding one here
+// never widens what the agent itself may touch.
+const ALLOWED_PATH = join(CONFIG_DIR, "bridge.allowed.json");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = "text/html; charset=utf-8";
 /**
@@ -238,9 +242,21 @@ export async function startBridge(): Promise<number> {
   // bridge's own config where it is set, and falls back to the agent's.
   const caps = cfg.agent ? loadCapabilities(cfg.agent) : undefined;
   const rules = caps ? new RuleBook(caps.vault, caps.workplaceRules) : undefined;
-  // The fence. The agent's coding config already lists the folders it may
-  // touch, so a drawer running as that agent is fenced the same way.
-  const allowedDirs = (cfg.allowedDirs ?? caps?.coding?.allowedDirs ?? []).map((d) => resolve(expandHome(d)));
+  /**
+   * The fence: the agent's folders as a starting point, the bridge's own
+   * config, and whatever the operator has since added from the drawer.
+   *
+   * Based on the agent, not dependent on it. Roy's list is where this starts,
+   * but a task that needs another checkout should not mean editing Roy's
+   * config and widening what Roy itself may touch on every run.
+   */
+  const added = new PersistedMap<string>(ALLOWED_PATH);
+  const fenceDirs = () => {
+    const dirs = [...(cfg.allowedDirs ?? []), ...(caps?.coding?.allowedDirs ?? [])].map((d) => resolve(expandHome(d)));
+    for (const dir of added.values()) dirs.push(dir);
+    return [...new Set(dirs)];
+  };
+  const allowedDirs = fenceDirs();
   // Which claude.ai connectors a turn may touch. Empty denies them all: the
   // hook refuses any `mcp__claude_ai_*` tool outside this list, so a connector
   // signed into the wrong workspace cannot be reached at all.
@@ -381,8 +397,9 @@ export async function startBridge(): Promise<number> {
     send(task, { type: "turn", state: "start", resumed: !!resume, workdir: bound.workdir });
 
     let streamed = false; // did this assistant message arrive as deltas?
-    const roots = fenceRoots(allowedDirs.length ? [...allowedDirs, bound.workdir] : [bound.workdir], []);
-    const fence = fenceHook(bound.workdir, roots, allowedDirs.length ? [...allowedDirs, bound.workdir] : [bound.workdir]);
+    const dirs = fenceDirs();
+    const roots = fenceRoots(dirs.length ? [...dirs, bound.workdir] : [bound.workdir], []);
+    const fence = fenceHook(bound.workdir, roots, dirs.length ? [...dirs, bound.workdir] : [bound.workdir]);
 
     // Writing as the operator in BasicOps only after the server proves which
     // workplace it is actually pointed at. The whole mess today was a turn
@@ -618,6 +635,22 @@ export async function startBridge(): Promise<number> {
     } catch (e: any) {
       return json(400, { error: e.message });
     }
+    /**
+     * Add a folder to the drawer's own scope, because the operator said so.
+     *
+     * This is the drawer's list, kept beside its sessions. The agent's config
+     * is not touched, so saying yes here never widens what the agent may do on
+     * its own runs.
+     */
+    if (url.pathname === "/allow") {
+      const checked = checkDir(payload.workdir);
+      if ("error" in checked) return json(400, { error: checked.error });
+      added.set(checked.dir, checked.dir);
+      console.log(`[bridge] folder added by the operator: ${checked.dir}`);
+      return json(200, { workdir: checked.dir, dirs: fenceDirs() });
+    }
+
+
     const id = String(payload.task ?? task ?? "");
     if (!id) return json(400, { error: "task is required" });
 
@@ -678,8 +711,14 @@ export async function startBridge(): Promise<number> {
     if (url.pathname === "/bind") {
       const checked = checkDir(payload.workdir);
       if ("error" in checked) return json(400, { error: checked.error });
-      if (allowedDirs.length && !fenceRoots(allowedDirs, []).some((r) => checked.dir === r || checked.dir.startsWith(r + "/"))) {
-        return json(400, { error: `${checked.dir} is outside the folders this bridge may use (${allowedDirs.join(", ")}).` });
+      const dirs = fenceDirs();
+      if (dirs.length && !fenceRoots(dirs, []).some((r) => checked.dir === r || checked.dir.startsWith(r + "/"))) {
+        // Not a refusal so much as a question: the operator can say yes.
+        return json(400, {
+          error: `${checked.dir} is outside this drawer's folders.`,
+          offer: checked.dir,
+          dirs,
+        });
       }
       const prev = bindings.get(id);
       // The folder is part of a session's identity: a session started elsewhere
@@ -743,6 +782,7 @@ export async function startBridge(): Promise<number> {
       console.log(`[bridge] drawer: http://127.0.0.1:${port}/demo?t=${cfg.token}`);
       console.log(`[bridge] claude:  ${claudePath}`);
       console.log(`[bridge] folders: ${allowedDirs.length ? allowedDirs.join(", ") : "(any, set allowedDirs in bridge.json to fence it)"}`);
+      if (added.size) console.log(`[bridge]   ${added.size} of those you added from the drawer`);
       console.log(`[bridge] agent: ${cfg.agent ?? "(none, the drawer has its own capabilities)"}`);
       if (caps) {
         const servers = Object.keys(caps.mcpServers ?? {});

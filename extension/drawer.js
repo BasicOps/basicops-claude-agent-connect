@@ -182,7 +182,11 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       body: JSON.stringify({ task: current, ...payload }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (!res.ok) {
+      const err = new Error(data.error || res.statusText);
+      Object.assign(err, data);
+      throw err;
+    }
     return data;
   }
 
@@ -261,11 +265,35 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
         refresh();
       } catch (e) {
         row("err", e.message);
+        // Outside the fence is a question, not a dead end: the operator can
+        // widen this drawer's folders without touching the agent's own.
+        if (e.offer) offerFolder(e.offer, go);
         go.disabled = false;
       }
     };
     wrap.append(path, pick, go);
     foot.prepend(wrap);
+  }
+
+  /** "That folder is outside the list. Add it?" */
+  function offerFolder(dir, go) {
+    const wrap = el("div", "bar");
+    const add = el("button", "primary", "Add this folder");
+    add.onclick = async () => {
+      add.disabled = true;
+      try {
+        await post("/allow", { workdir: dir });
+        wrap.remove();
+        row("note", "Added " + dir + " to this drawer's folders.");
+        go.click();
+      } catch (e2) {
+        row("err", e2.message);
+        add.disabled = false;
+      }
+    };
+    wrap.append(el("div", "empty", dir + " is not in this drawer's folders yet."), add);
+    body.append(wrap);
+    scroll();
   }
 
   function connectPrompt() {
