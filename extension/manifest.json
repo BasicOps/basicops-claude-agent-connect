@@ -29,17 +29,6 @@
         "https://*.basicops.com/*"
       ],
       "js": [
-        "watch-main.js"
-      ],
-      "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": false
-    },
-    {
-      "matches": [
-        "https://*.basicops.com/*"
-      ],
-      "js": [
         "watch.js"
       ],
       "run_at": "document_start",

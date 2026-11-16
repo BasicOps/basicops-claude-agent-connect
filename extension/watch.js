@@ -1,25 +1,21 @@
 /**
  * Works out which task is on screen, and tells the worker when it changes.
  *
- * The split that matters, which I had backwards at first:
+ * It only reads: the URL for the id, the DOM for the name and the breadcrumb.
+ * It runs in the extension's own world and touches nothing the app owns.
  *
- *   The URL says WHICH task is open. The API says WHAT that task contains.
- *
- * A feed or a list fetches many tasks, so "the last task the app fetched" is
- * not the task you are looking at; it is just the last row that loaded. Taking
- * the id from a fetch meant the drawer pinned whichever task happened to load
- * first and then never moved, because once it had an id it stopped listening.
- *
- * So the URL decides the id, every time it changes, and the fetches only fill
- * in the title and description for ids we have seen go past.
+ * There used to be a second script in the page's own world, patching fetch,
+ * XHR and the WebSocket to harvest task text. It never delivered anything
+ * useful, and injecting it into a running page made BasicOps navigate away
+ * from the task you had open. The task's text comes from the agent's own
+ * BasicOps server now, which is live and authoritative, so nothing needs to
+ * touch the app's internals.
  */
 (() => {
   // Injected again after an extension reload? One watcher is enough.
   if (window.__boWatch) return;
   window.__boWatch = true;
 
-  /** id -> { title, description }, from whatever the app has fetched. */
-  const details = new Map();
   let sentId = null;
   let sentText = null;
 
@@ -51,8 +47,7 @@
   }
 
   function push(id) {
-    const d = (id && details.get(id)) || { title: "", description: "" };
-    if (!d.title) d.title = titleFromDom();
+    const d = { title: id ? titleFromDom() : "", description: "" };
     const parents = id ? parentsFromUrl() : [];
     const trail = id ? trailFromDom() : [];
     const text = d.title + "\u0000" + d.description + "\u0000" + parents.join(",") + "\u0000" + trail.join(">");
@@ -146,20 +141,6 @@
     push(id);
   }
 
-  // Details arriving from the page's own traffic.
-  window.addEventListener("message", (ev) => {
-    if (ev.source !== window || ev.origin !== location.origin) return;
-    const d = ev.data;
-    if (!d || d.__boDrawer !== true || !d.id) return;
-    const id = String(d.id);
-    if (d.title || d.description) {
-      details.set(id, { title: d.title || "", description: d.description || "" });
-    }
-    // Only re-send if this is the task actually on screen. A feed loading
-    // fifty rows must not drag the drawer along with it.
-    if (id === openTask()) push(id);
-  });
-
   // The app routes without reloading, so watch the URL rather than trust an
   // event. 400ms is below noticing and costs nothing.
   addEventListener("popstate", sync);
@@ -175,11 +156,10 @@
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg?.type !== "bo-task-ask") return;
     const id = openTask();
-    const d = (id && details.get(id)) || { title: "", description: "" };
     reply({
       id,
-      name: d.title || titleFromDom(),
-      description: d.description,
+      name: id ? titleFromDom() : "",
+      description: "",
       parents: id ? parentsFromUrl() : [],
       trail: id ? trailFromDom() : [],
     });

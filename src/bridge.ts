@@ -197,23 +197,18 @@ function plainText(html: string, limit = 4000): string {
  * it was read from the operator's screen, not from BasicOps, so it can be out
  * of date and the agent should say so rather than trust it blindly.
  */
-function taskBrief(ctx?: { title: string; description: string }): string {
-  if (!ctx || (!ctx.title && !ctx.description)) {
-    // Left to itself the agent goes looking through whatever connectors it
-    // has, which here means a BasicOps signed into the wrong workspace, five
-    // approval prompts, and a dead end. Asking is quicker and honest.
-    return (
-      `\n\nYou have not been given the text of this task, only its number. ` +
-      `Do not go looking for it through connectors or the web: the operator is right there, so ask them what it says.`
-    );
-  }
+function taskBrief(ctx: { title: string; description: string } | undefined, reader?: string): string {
+  // What the drawer knows is the task's number and the name on screen. The
+  // text itself comes from the agent's own BasicOps server, which is live and
+  // authoritative, so point at that rather than have it guess or ask.
+  const how = reader
+    ? `\n\nRead the task itself with \`${reader}__get_task\` (and its discussion and subtasks) before answering questions about it.`
+    : `\n\nYou have only the task's number and name, and no tool configured to read it. Ask the operator what it says rather than hunting for it.`;
+  if (!ctx || (!ctx.title && !ctx.description)) return how;
   const parts = ["\n\nThis is what the task says, copied from the operator's screen:"];
   if (ctx.title) parts.push(`\nTitle: ${ctx.title}`);
   if (ctx.description) parts.push(`\n\n${ctx.description}`);
-  parts.push(
-    `\n\nThat is a copy and may be out of date, so treat it as the brief rather than the record. ` +
-      `You do not need to go looking for this task elsewhere.`,
-  );
+  parts.push(`\n\nThat name is read off the operator's screen, so treat it as a label, not the record.${how}`);
   return parts.join("");
 }
 
@@ -251,6 +246,14 @@ export async function startBridge(): Promise<number> {
   // signed into the wrong workspace cannot be reached at all.
   const connectors = cfg.claudeAiConnectors ?? caps?.claudeAiConnectors ?? [];
   const conn = connectorsForTurn(connectors, false);
+  // The agent's own BasicOps server, if it has one: the thing that can
+  // actually read a task, in the workspace the operator is looking at.
+  const basicopsReader = (() => {
+    const named = caps?.operatorBasicops?.server;
+    if (named) return `mcp__${named}`;
+    const guess = Object.keys(caps?.mcpServers ?? {}).find((n) => /basicops/i.test(n));
+    return guess ? `mcp__${guess}` : undefined;
+  })();
   /**
    * Does every write and shell call stop and wait for the operator?
    *
@@ -445,7 +448,7 @@ export async function startBridge(): Promise<number> {
               (ask
                 ? `Your file and shell calls are shown to the operator for approval as you make them, so work in small, obvious steps.`
                 : `The operator is watching every tool call as you make it, so work in small, obvious steps.`) +
-              taskBrief(context.get(task)) +
+              taskBrief(context.get(task), basicopsReader) +
               // The agent's standing rules and its operator's instructions,
               // re-read every turn so the drawer follows the same vault the
               // agent does without a restart.

@@ -215,18 +215,20 @@ Two reasons it exists rather than pasting `inject.js` into the page:
 - **It can reach the bridge.** An extension page is not a public origin, so
   Chrome's local network block does not apply and the panel can hold an
   `EventSource` open to `http://127.0.0.1:4710` directly. No tunnel.
-- **It can read the task.** A content script runs at `document_start` in the
-  page's own world and patches the **WebSocket** (and fetch and XHR) before
-  the app loads, then harvests any task-shaped object out of the frames.
-  BasicOps is a jQuery app that talks over a socket: loading the dashboard
-  makes seventy HTTP requests and not one of them carries data, so anything
-  watching `/v1/task/<id>` is watching a transport the app does not use.
-  Title and description go to `/context` and into the turn's system prompt.
-  When the bridge has no text for a task it says so in the prompt, and tells
-  the agent to ask rather than go hunting through connectors.
+- **It reads the page, and only reads it.** One content script, in the
+  extension's own world: the URL for the task id, the DOM for the name and the
+  breadcrumb. It touches nothing the app owns.
 
-  Note `api.basicops.com` is the API the MCP server uses, not the one the web
-  app uses. That mistake cost several rounds.
+  There was a second script in the page's own world, patching `fetch`, `XHR`
+  and the `WebSocket` to harvest task text. It never delivered anything, and
+  injecting it into an already-running page made BasicOps navigate away from
+  the task you had open. It is gone. The task's text comes from the agent's
+  own BasicOps MCP server, which is live, authoritative, and in the right
+  workspace, and the system prompt tells the turn to use it.
+
+  (Two dead ends worth recording: `api.basicops.com` is the API the MCP server
+  uses, not the one the web app uses, and the web app talks over a WebSocket,
+  so a dashboard load makes seventy HTTP requests carrying no data at all.)
 
 The split that matters, and that I got backwards at first:
 

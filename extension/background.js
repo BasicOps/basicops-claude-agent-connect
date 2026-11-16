@@ -30,16 +30,11 @@ async function adopt() {
   for (const tab of tabs) {
     if (tab.id == null) continue;
     offer(tab.id, tab.url);
-    for (const [file, world] of [
-      ["watch-main.js", "MAIN"],
-      ["watch.js", "ISOLATED"],
-    ]) {
-      try {
-        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: [file], world });
-      } catch {
-        // The page is still loading, or it went away. Its own content script
-        // will run on the next load anyway.
-      }
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["watch.js"], world: "ISOLATED" });
+    } catch {
+      // The page is still loading, or it went away. Its own content script
+      // will run on the next load anyway.
     }
   }
 }
