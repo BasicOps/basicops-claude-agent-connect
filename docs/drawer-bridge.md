@@ -137,11 +137,32 @@ read from the page's one visible `.task-title`, which belongs to the task the
 URL names. Simpler than fishing it out of a socket frame, and it is the same
 text you are looking at, which is the point: a wrong task is visible.
 
+### The conversation survives a reload
+
+The panel keeps a task's turns in memory. The session behind them outlives the
+panel, so reloading the extension, closing the panel or restarting Chrome used
+to leave the agent answering "as I said in my last reply" above a blank drawer.
+
+The bridge now records what the drawer showed, in `bridge.transcripts.json`,
+and serves it from `GET /history?task=&t=`. The panel asks for it only when it
+has nothing of its own, so a live conversation is never redrawn from disk.
+
+It holds the last 200 entries per task: your messages, the agent's replies,
+tool lines and notes. Not tool results, not the system prompt, not thinking.
+This is the drawer's scrollback, not a second copy of the session.
+
+Starting a new session clears it, through `/reset` or by binding a different
+folder. The old scrollback belongs to a conversation the agent can no longer
+see, and leaving it on screen would be the same lie in reverse.
+
+The durable record still belongs in the task thread. This is so the panel and
+the agent agree about what was said.
+
 ### How a turn reads
 
 Your own message sits in a box, the way it does in Claude's own chat. Claude's
-replies are rendered markdown: headings, lists, bold, inline code, fenced
-blocks, rules and http links.
+replies are rendered markdown: headings, lists, tables, bold, inline code,
+fenced blocks, rules and http links.
 
 The renderer builds DOM nodes and never touches `innerHTML`. The text comes
 from a model that reads tasks, files and the web, so nothing in it is allowed

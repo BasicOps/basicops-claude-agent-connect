@@ -10,6 +10,7 @@
  *   GET  /                      the raw protocol tester
  *   GET  /demo, /drawer.js      the drawer, and a pretend app to switch tasks in
  *   GET  /state?task=&t=        { workdir, sessionId, busy }
+ *   GET  /history?task=&t=      what the drawer has shown for this task
  *   GET  /events?task=&t=       SSE: text, tool, ask, turn, error
  *   POST /bind                  { task, workdir }      bind the task's folder
  *   POST /message               { task, text }         run a turn
@@ -56,6 +57,10 @@ const ALLOWED_PATH = join(CONFIG_DIR, "bridge.allowed.json");
 // Project names, so a folder anchored to a project can say which one it is
 // after a restart, when no task from that project has been opened yet.
 const PROJECTS_PATH = join(CONFIG_DIR, "bridge.projects.json");
+// What each task's drawer has shown. The agent remembers a task's thread
+// through its Claude Code session, so without this the panel forgets a
+// conversation the agent is still referring to.
+const TRANSCRIPTS_PATH = join(CONFIG_DIR, "bridge.transcripts.json");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = "text/html; charset=utf-8";
 /**
@@ -139,6 +144,9 @@ type BridgeConfig = {
  * being quietly pinned to wherever they first ran.
  */
 type Binding = { workdir: string; sessionId?: string; from?: string };
+
+/** One line of a task's drawer scrollback. "" is the agent's own words. */
+type Said = { kind: "" | "you" | "note" | "err" | "tool"; text: string };
 
 type Pending = { name: string; input: Record<string, unknown>; settle: (r: PermissionResult) => void };
 type Run = { abort: AbortController; pending: Map<string, Pending> };
@@ -380,6 +388,58 @@ export async function startBridge(): Promise<number> {
     from.startsWith("project:")
       ? `project "${projectNames.get(from.slice(8)) ?? from.slice(8)}"`
       : `task #${from}`;
+  /**
+   * The transcript the drawer has shown for each task.
+   *
+   * The panel keeps turns in memory, so reloading the extension, closing the
+   * panel or restarting Chrome emptied it. The session behind it survives all
+   * three, which left the agent answering "as I said in my last reply" above a
+   * blank panel. Whatever has been shown is kept here and replayed.
+   *
+   * Only what was on screen: no tool results, no system prompt, no thinking.
+   * This is the drawer's scrollback, not a second copy of the session.
+   */
+  const transcripts = new PersistedMap<Said[]>(TRANSCRIPTS_PATH);
+  const KEEP = 200; // entries per task
+  const LONGEST = 20_000; // characters per entry
+
+  const said = (task: string) => transcripts.get(task) ?? [];
+
+  /** Write the task's scrollback back to disk, newest `KEEP` entries. */
+  const keep = (task: string, entries: Said[]) => {
+    transcripts.set(task, entries.length > KEEP ? entries.slice(-KEEP) : entries);
+  };
+
+  const remember = (task: string, kind: Said["kind"], text: string) => {
+    if (!text) return;
+    keep(task, [...said(task), { kind, text: text.slice(0, LONGEST) }]);
+  };
+
+  /**
+   * Assistant text arrives as deltas, so it joins the entry it is still being
+   * typed into. Deltas are not written to disk one at a time: the next thing
+   * that happens (a tool, the end of the turn) flushes it.
+   */
+  const typed = new Map<string, string>();
+  const flush = (task: string) => {
+    const text = typed.get(task);
+    typed.delete(task);
+    if (text?.trim()) remember(task, "", text);
+  };
+
+  /** A tool call in one line, rendered once so live and replayed rows match. */
+  const toolLine = (name: string, input: any): string => {
+    const first =
+      typeof input?.command === "string"
+        ? input.command
+        : typeof input?.file_path === "string"
+          ? input.file_path
+          : input && typeof input === "object"
+            ? JSON.stringify(input)
+            : String(input ?? "");
+    return (name + " " + first.split("\n")[0]).slice(0, 160);
+  };
+
   const clients = new Map<string, Set<http.ServerResponse>>();
 
   // The real app is allowed by default; anything else goes in `origins`.
@@ -394,8 +454,25 @@ export async function startBridge(): Promise<number> {
    */
   const allowed = (origin: string) => origins.has(origin) || origin.startsWith("chrome-extension://");
 
-  /** Push an event to every panel watching this task. */
+  /**
+   * Push an event to every panel watching this task, and record what a panel
+   * would have shown. Recording here rather than at each call site is what
+   * keeps the replay honest: anything the drawer renders came through here.
+   */
   const send = (task: string, event: Record<string, unknown>) => {
+    if (event.type === "text") {
+      typed.set(task, (typed.get(task) ?? "") + String(event.text ?? ""));
+    } else {
+      flush(task);
+      if (event.type === "tool") {
+        event.line = toolLine(String(event.name), event.input);
+        remember(task, "tool", String(event.line));
+      } else if (event.type === "turn") {
+        if (event.state === "start" && !event.resumed) remember(task, "note", "New session in " + event.workdir);
+        else if (event.state === "error") remember(task, "err", String(event.error || "The turn failed."));
+        else if (event.state === "stopped") remember(task, "note", "Stopped.");
+      }
+    }
     const line = `data: ${JSON.stringify(event)}\n\n`;
     for (const res of clients.get(task) ?? []) res.write(line);
   };
@@ -565,6 +642,7 @@ export async function startBridge(): Promise<number> {
       console.error(`  [bridge] turn ${stopped ? "stopped" : "failed"}: ${e.message}`);
       send(task, { type: "turn", state: stopped ? "stopped" : "error", error: stopped ? undefined : e.message });
     } finally {
+      flush(task);
       for (const [, p] of pending) p.settle({ behavior: "deny", message: "The turn ended.", interrupt: true });
       runs.delete(task);
     }
@@ -668,6 +746,10 @@ export async function startBridge(): Promise<number> {
           // So a drawer that was closed mid-turn can show the prompt it missed.
           pending: [...(run?.pending ?? [])].map(([id, p]) => ({ id, name: p.name, input: p.input })),
         });
+      }
+      if (url.pathname === "/history") {
+        if (!task) return json(400, { error: "task is required" });
+        return json(200, { task, said: said(task) });
       }
       return json(404, { error: "not found" });
     }
@@ -796,6 +878,9 @@ export async function startBridge(): Promise<number> {
       // can't be resumed here, so moving the folder starts a new thread.
       const sessionId = prev && prev.workdir === checked.dir ? prev.sessionId : undefined;
       bindings.set(key, { workdir: checked.dir, sessionId });
+      // No session carried over means a new thread, so the old scrollback
+      // belongs to a conversation the agent can no longer see.
+      if (!whole && !sessionId) transcripts.delete(id);
       if (whole) {
         // This task may have its own folder, which still wins. Say so rather
         // than let the header look as if nothing happened.
@@ -820,6 +905,7 @@ export async function startBridge(): Promise<number> {
       if (!text) return json(400, { error: "text is required" });
       const why = blocked(id);
       if (why) return json(409, { error: why });
+      remember(id, "you", text);
       // Run in the background: the reply arrives on the task's SSE stream.
       runTurn(id, text).catch((e) => send(id, { type: "turn", state: "error", error: e.message }));
       return json(202, { task: id, accepted: true });
@@ -843,6 +929,7 @@ export async function startBridge(): Promise<number> {
       if (!b) return json(404, { error: "that task has no folder bound" });
       if (runs.has(id)) return json(409, { error: "stop the running turn first" });
       bindings.set(id, { workdir: b.workdir, from: b.from });
+      transcripts.delete(id);
       console.log(`[bridge] task ${id} session cleared (folder kept: ${b.workdir})`);
       send(id, { type: "bound", workdir: b.workdir, sessionId: null });
       return json(200, { task: id, workdir: b.workdir, sessionId: null });

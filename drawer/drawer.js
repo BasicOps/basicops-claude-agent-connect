@@ -63,6 +63,11 @@ const CSS = `
 .row pre code { background: none; border: 0; padding: 0; font-size: 12px; }
 .row a { color: var(--accent); }
 .row hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.row .md-table { overflow-x: auto; margin: 0 0 10px; }
+.row table { border-collapse: collapse; white-space: normal; font-size: 13px; }
+.row th, .row td { border-bottom: 1px solid var(--line); padding: 5px 10px 5px 0; text-align: left; vertical-align: top; }
+.row th { font-weight: 600; color: var(--muted); font-size: 12px; }
+.row tr:last-child td { border-bottom: 0; }
 .row.err { color: var(--err); }
 .row.tool { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; margin-bottom: 8px; }
 .ask { border: 1px solid currentColor; color: var(--warn); background: var(--warn-bg); border-radius: 8px; padding: 9px 10px; margin: 0 0 10px; }
@@ -90,7 +95,9 @@ button:disabled { opacity: .5; cursor: default; }
  * rather than innerHTML: the text comes from a model that reads tasks, files
  * and the web, and none of that should ever be able to put markup on screen.
  */
-const MD_INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+// The href allows balanced parens, because plenty of real URLs carry them and
+// stopping at the first `)` turns the rest of the line into literal brackets.
+const MD_INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[[^\]]*\]\((?:[^()\s]|\([^()\s]*\))+\))/g;
 
 function mdInline(text, into) {
   let at = 0;
@@ -145,6 +152,34 @@ function md(src) {
       const pre = el("pre");
       pre.append(el("code", null, code.join("\n")));
       out.append(pre);
+      continue;
+    }
+
+    // A table: a row of cells, then a row of dashes. Without the dashes it is
+    // just a line that happens to have pipes in it.
+    if (line.includes("|") && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1] ?? "") && (lines[i + 1] ?? "").includes("-")) {
+      flush();
+      endList();
+      const cells = (r) =>
+        r
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((c) => c.trim());
+      const table = el("table");
+      const headRow = el("tr");
+      for (const c of cells(line)) headRow.append(mdInline(c, el("th")));
+      table.append(headRow);
+      for (i += 2; i < lines.length && lines[i].includes("|"); i++) {
+        const tr = el("tr");
+        for (const c of cells(lines[i])) tr.append(mdInline(c, el("td")));
+        table.append(tr);
+      }
+      i--; // the loop's own i++ takes the line that ended the table
+      const scroller = el("div", "md-table");
+      scroller.append(table);
+      out.append(scroller);
       continue;
     }
 
@@ -515,7 +550,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
         scroll();
       } else if (ev.type === "tool") {
         settle();
-        row("tool", ev.name + " " + summarise(ev.input).split("\n")[0].slice(0, 160));
+        row("tool", ev.line || ev.name + " " + summarise(ev.input).split("\n")[0].slice(0, 160));
       } else if (ev.type === "ask") {
         settle();
         askCard(ev);
@@ -595,15 +630,41 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       connectPrompt();
       return;
     }
-    // Replay what this task said earlier in this page's life.
-    for (const e of history.get(id) ?? []) {
-      if (e.ask) askCard(e.ask, false);
-      else row(e.kind, e.text, false);
-    }
-    if (!(history.get(id) ?? []).length) body.append(el("div", "empty", "Nothing yet for this task."));
+    replay(id);
     shareContext(name, description, lineage);
     open();
     refresh();
+  }
+
+  /**
+   * Put the task's conversation back on screen.
+   *
+   * What this page has shown is in memory. What it showed before a reload is
+   * not, and the agent's session outlives the panel, so it answers "as I said
+   * in my last reply" over a blank drawer. The bridge keeps the scrollback,
+   * and it is only asked when this page has nothing of its own.
+   */
+  async function replay(id) {
+    const mine = history.get(id) ?? [];
+    for (const e of mine) {
+      if (e.ask) askCard(e.ask, false);
+      else row(e.kind, e.text, false);
+    }
+    if (mine.length) return;
+
+    let said = [];
+    try {
+      const res = await fetch(`${bridge}/history?task=${encodeURIComponent(id)}&t=${encodeURIComponent(auth)}`);
+      said = (await res.json()).said ?? [];
+    } catch {
+      // No history is not an error worth a red line: the drawer still works.
+    }
+    // The task may have been switched away from while that was in flight, and
+    // a turn may have started and drawn into the body.
+    if (id !== current || (history.get(id) ?? []).length) return;
+    history.set(id, said.slice());
+    for (const e of said) row(e.kind, e.text, false);
+    if (!said.length) body.append(el("div", "empty", "Nothing yet for this task."));
   }
 
   send.onclick = async () => {
