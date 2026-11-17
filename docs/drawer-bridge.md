@@ -95,6 +95,41 @@ Finding the parent takes two routes, because neither covers everything:
 The API does not help here: `get_task` returns the project, not the parent
 task, so the parent can only be found from what is on screen.
 
+### Anchoring a folder to a project
+
+A folder bound to a task is that task's. A folder anchored to a project is
+every task's, for every task opened inside it.
+
+Tick **All of `<project>`** in the bind row and the folder is stored against
+the project instead of the task. The checkbox only appears when a project is
+actually open, because only then does the page say which one it is.
+
+The order a task's folder is decided in, nearest first:
+
+1. a folder bound to the task itself
+2. the nearest ancestor task's, by overlay id, then by breadcrumb name
+3. the project's
+
+The session is always the task's own, so every task gets its own thread in the
+shared checkout.
+
+A folder a task only inherited is re-read every turn, not frozen the first time
+it runs. Re-anchor the project and its tasks follow. A folder bound to the task
+directly always wins, and anchoring says so when it is being overridden.
+
+The project id is read from the task's own URL, which carries it twice and
+agrees with itself:
+
+    /c/v95402-69636/project-tasks-main/list/l2214578/…/projects/a69636
+
+The same task opened through **My Tasks** has neither form, so it reports no
+project and inherits nothing. That is correct rather than a gap: nothing on
+screen says which project it belongs to, and guessing would bind a folder on a
+hunch. Open the task inside its project and it picks the anchor up.
+
+Project names are kept in `bridge.projects.json`, only so the drawer can say
+"from project Foo" after a restart.
+
 ### The task's name
 
 The drawer shows the task's name, with its number as small print. The name is

@@ -72,6 +72,8 @@ const CSS = `
 .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .bar input { flex: 1; min-width: 0; }
 .bar .empty { flex-basis: 100%; }
+.bar .whole { flex-basis: 100%; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; cursor: pointer; }
+.bar .whole input { width: auto; flex: none; margin: 0; }
 textarea, input { font: inherit; width: 100%; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px 9px; }
 textarea { resize: vertical; min-height: 60px; }
 button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 7px; padding: 7px 11px; cursor: pointer; }
@@ -332,7 +334,9 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     if (current) bits.push("#" + current);
     if (state.workdir) bits.push(state.workdir.split("/").slice(-2).join("/"));
     else bits.push("no folder bound");
-    if (state.inheritedFrom) bits[bits.length - 1] += " (from #" + state.inheritedFrom + ")";
+    // The bridge names the source, because only it knows whether that key is
+    // a task or a project.
+    if (state.inheritedName) bits[bits.length - 1] += " (from " + state.inheritedName + ")";
     if (state.sessionId) bits.push("session " + state.sessionId.slice(0, 8));
     meta.textContent = bits.join(" · ");
     meta.title = state.workdir || "";
@@ -388,17 +392,35 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
       path.focus();
     };
 
+    /**
+     * Anchor it to the project instead, so every task in that project starts
+     * in this folder. Only offered when a project is actually open: viewed
+     * through My Tasks, a task's page says nothing about its project, and
+     * anchoring on a guess is how the wrong repo gets a session.
+     */
+    const whole = el("label", "whole");
+    const all = el("input");
+    all.type = "checkbox";
+    whole.append(all, document.createTextNode(" All of " + (state.projectName || "this project")));
+    if (!state.project) whole.style.display = "none";
+
     const go = el("button", "primary", "Bind folder");
     go.onclick = async () => {
       go.disabled = true;
       try {
         const before = state.workdir;
-        const after = await post("/bind", { workdir: clean() });
+        const after = await post("/bind", { workdir: clean(), scope: all.checked ? "project" : "task" });
         localStorage.setItem("bo-drawer-lastdir", clean());
         wrap.remove();
+        if (after.anchored) {
+          row("note", "Every task in " + (state.projectName || "this project") + " now starts in " + after.workdir + ".");
+          // Its own folder still wins, so the header will not change. Saying
+          // nothing here reads as if the anchor had not taken.
+          if (after.overridden) row("note", "This task keeps its own folder, which was set directly.");
+        }
         // Moving the folder means a new session: the old transcript lives under
         // the old path and can't be resumed from here.
-        if (before && after.workdir !== before) row("note", "Folder changed, so this task starts a new session.");
+        else if (before && after.workdir !== before) row("note", "Folder changed, so this task starts a new session.");
         refresh();
       } catch (e) {
         row("err", e.message);
@@ -408,7 +430,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
         go.disabled = false;
       }
     };
-    wrap.append(path, pick, go);
+    wrap.append(path, pick, go, whole);
     foot.prepend(wrap);
   }
 

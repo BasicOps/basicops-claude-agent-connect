@@ -50,12 +50,14 @@
     const d = { title: id ? titleFromDom() : "", description: "" };
     const parents = id ? parentsFromUrl() : [];
     const trail = id ? trailFromDom() : [];
-    const text = d.title + "\u0000" + d.description + "\u0000" + parents.join(",") + "\u0000" + trail.join(">");
+    const project = id ? projectFromUrl() : null;
+    const projectName = project ? trail[0] || "" : "";
+    const text = [d.title, d.description, parents.join(","), trail.join(">"), project, projectName].join("\u0000");
     if (id === sentId && text === sentText) return;
     sentId = id;
     sentText = text;
     try {
-      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description, parents, trail });
+      chrome.runtime.sendMessage({ type: "bo-task", id, name: d.title, description: d.description, parents, trail, project, projectName });
     } catch {
       // The extension was reloaded; the next change reconnects.
     }
@@ -88,6 +90,27 @@
   function parentsFromUrl() {
     const stack = overlayStack();
     return stack.slice(0, -1).reverse();
+  }
+
+  /**
+   * The open project's id, or null when the task is not being viewed inside
+   * one. A project task's path carries it twice and they agree:
+   *
+   *   /c/v95402-69636/project-tasks-main/list/l2214578/…/projects/a69636
+   *
+   * The trailing `a<id>` is the plainer of the two, so it is read first. The
+   * `v<view>-<project>` segment is the fallback, for views that do not end in
+   * the project.
+   *
+   * The same task opened through My Tasks has neither, and reports no project.
+   * That is correct rather than a gap: nothing on screen says which project it
+   * belongs to, and guessing one would bind a folder on a hunch.
+   */
+  function projectFromUrl() {
+    const tail = location.pathname.match(/\/projects\/a(\d+)(?:\/|$)/);
+    if (tail) return tail[1];
+    const head = location.pathname.match(/\/c\/v\d+-(\d+)(?:\/|$)/);
+    return head ? head[1] : null;
   }
 
   function taskFromUrl() {
@@ -156,12 +179,16 @@
   chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     if (msg?.type !== "bo-task-ask") return;
     const id = openTask();
+    const trail = id ? trailFromDom() : [];
+    const project = id ? projectFromUrl() : null;
     reply({
       id,
       name: id ? titleFromDom() : "",
       description: "",
       parents: id ? parentsFromUrl() : [],
-      trail: id ? trailFromDom() : [],
+      trail,
+      project,
+      projectName: project ? trail[0] || "" : "",
     });
     return true;
   });

@@ -93,7 +93,7 @@ async function askTab(tabId) {
   try {
     const res = await chrome.tabs.sendMessage(tabId, { type: "bo-task-ask" });
     if (!res) return null;
-    return { id: res.id == null ? null : String(res.id), name: res.name || "", description: res.description || "", parents: res.parents ?? [], trail: res.trail ?? [] };
+    return { id: res.id == null ? null : String(res.id), name: res.name || "", description: res.description || "", parents: res.parents ?? [], trail: res.trail ?? [], project: res.project ?? null, projectName: res.projectName || "" };
   } catch {
     // No content script answering: not a BasicOps page, not loaded yet, or
     // orphaned. See `stranded` for why the last one needs saying out loud.
@@ -121,7 +121,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === "bo-task" && sender.tab?.id != null) {
     // A null id is a real answer: no task is open. Stringifying it here is
     // how the drawer ended up asking the bridge about a task called "null".
-    const task = { id: msg.id == null ? null : String(msg.id), name: msg.name || "", description: msg.description || "", parents: msg.parents ?? [], trail: msg.trail ?? [] };
+    const task = { id: msg.id == null ? null : String(msg.id), name: msg.name || "", description: msg.description || "", parents: msg.parents ?? [], trail: msg.trail ?? [], project: msg.project ?? null, projectName: msg.projectName || "" };
     remember(sender.tab.id, task);
     chrome.runtime.sendMessage({ type: "bo-task-changed", tabId: sender.tab.id, ...task }).catch(() => {});
     return;
@@ -130,7 +130,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === "bo-task-get") {
     (async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) return reply({ tabId: null, id: null, name: "", description: "", parents: [], trail: [] });
+      if (!tab?.id) return reply({ tabId: null, id: null, name: "", description: "", parents: [], trail: [], project: null, projectName: "" });
       const answered = await askTab(tab.id);
       // On a BasicOps page with no answer, the watcher is gone. Remembering
       // what that tab used to show would put a stale task in the drawer and
@@ -145,6 +145,8 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         description: fresh?.description ?? "",
         parents: fresh?.parents ?? [],
         trail: fresh?.trail ?? [],
+        project: fresh?.project ?? null,
+        projectName: fresh?.projectName ?? "",
         needsReload: !answered && (await stranded(tab)),
       });
     })();
@@ -157,6 +159,6 @@ chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(KEY(t
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   offer(tabId, tab?.url);
-  const task = (await askTab(tabId)) ?? (await recall(tabId)) ?? { id: null, name: "", description: "", parents: [], trail: [] };
+  const task = (await askTab(tabId)) ?? (await recall(tabId)) ?? { id: null, name: "", description: "", parents: [], trail: [], project: null, projectName: "" };
   chrome.runtime.sendMessage({ type: "bo-task-changed", tabId, ...task }).catch(() => {});
 });

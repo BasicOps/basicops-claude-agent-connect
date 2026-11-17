@@ -53,6 +53,9 @@ const NAMES_PATH = join(CONFIG_DIR, "bridge.names.json");
 // agent's folders; it does not borrow the agent's list, so adding one here
 // never widens what the agent itself may touch.
 const ALLOWED_PATH = join(CONFIG_DIR, "bridge.allowed.json");
+// Project names, so a folder anchored to a project can say which one it is
+// after a restart, when no task from that project has been opened yet.
+const PROJECTS_PATH = join(CONFIG_DIR, "bridge.projects.json");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = "text/html; charset=utf-8";
 /**
@@ -129,7 +132,13 @@ type BridgeConfig = {
   claudePath?: string;
 };
 
-type Binding = { workdir: string; sessionId?: string };
+/**
+ * `from` records that this folder was inherited, not chosen for this task. The
+ * task still keeps its own session here, but whoever it came from keeps
+ * deciding the folder: re-anchor a project and its tasks follow, instead of
+ * being quietly pinned to wherever they first ran.
+ */
+type Binding = { workdir: string; sessionId?: string; from?: string };
 
 type Pending = { name: string; input: Record<string, unknown>; settle: (r: PermissionResult) => void };
 type Run = { abort: AbortController; pending: Map<string, Pending> };
@@ -311,6 +320,15 @@ export async function startBridge(): Promise<number> {
   // overlay stack to read (walking down the task tree gives none).
   const trails = new Map<string, string[]>();
 
+  // The project a task is open inside, when the page is showing one. Not
+  // persisted: the page re-sends it every time a task is opened.
+  const projectOf = new Map<string, string>();
+  const projectNames = new PersistedMap<string>(PROJECTS_PATH);
+
+  // A project's folder lives in the same table as the tasks', under a key no
+  // task id can collide with: task ids are digits, this one is not.
+  const projectKey = (project: string) => "project:" + project;
+
   const names = new PersistedMap<string>(NAMES_PATH);
 
   /** The id of a task we have been told the name of. Most recent wins. */
@@ -329,7 +347,10 @@ export async function startBridge(): Promise<number> {
    */
   const boundFor = (id: string): (Binding & { inheritedFrom?: string }) | undefined => {
     const own = bindings.get(id);
-    if (own?.workdir) return own;
+    // A folder chosen for this task wins. One it merely inherited does not:
+    // that is re-read below, so moving the project's folder moves this task's
+    // too, even after it has run and written its session here.
+    if (own?.workdir && !own.from) return own;
     // Ancestors by id (the overlay stack), nearest first.
     for (const up of parents.get(id) ?? []) {
       const anc = bindings.get(up);
@@ -342,8 +363,23 @@ export async function startBridge(): Promise<number> {
       const anc = up ? bindings.get(up) : undefined;
       if (up && anc?.workdir) return { workdir: anc.workdir, sessionId: own?.sessionId, inheritedFrom: up };
     }
+    // Then the project the task is open inside. The widest scope, and the last
+    // asked: anything nearer has already answered.
+    const project = projectOf.get(id);
+    const anchored = project ? bindings.get(projectKey(project)) : undefined;
+    if (project && anchored?.workdir) {
+      return { workdir: anchored.workdir, sessionId: own?.sessionId, inheritedFrom: projectKey(project) };
+    }
+    // Nothing to inherit from any more: whatever this task last worked in
+    // still beats sending it nowhere.
     return own;
   };
+
+  /** How a folder's source reads in a log line or the drawer's header. */
+  const sourceName = (from: string) =>
+    from.startsWith("project:")
+      ? `project "${projectNames.get(from.slice(8)) ?? from.slice(8)}"`
+      : `task #${from}`;
   const clients = new Map<string, Set<http.ServerResponse>>();
 
   // The real app is allowed by default; anything else goes in `origins`.
@@ -386,7 +422,7 @@ export async function startBridge(): Promise<number> {
   async function runTurn(task: string, text: string) {
     const bound = boundFor(task)!;
     const abort = new AbortController();
-    if (bound.inheritedFrom) console.log(`[bridge] task ${task} works in ${bound.workdir} (its parent #${bound.inheritedFrom}'s folder)`);
+    if (bound.inheritedFrom) console.log(`[bridge] task ${task} works in ${bound.workdir} (${sourceName(bound.inheritedFrom)}'s folder)`);
     const pending = new Map<string, Pending>();
     runs.set(task, { abort, pending });
 
@@ -490,8 +526,10 @@ export async function startBridge(): Promise<number> {
       })) {
         const sid = (m as any).session_id;
         if (sid && sid !== bindings.get(task)?.sessionId) {
-          // The folder may be the parent's; the session is this task's own.
-          bindings.set(task, { workdir: bound.workdir, sessionId: sid });
+          // The folder may be the parent's or the project's; the session is
+          // this task's own. `from` keeps that distinction, so writing the
+          // session here does not quietly pin an inherited folder.
+          bindings.set(task, { workdir: bound.workdir, sessionId: sid, from: bound.inheritedFrom });
         }
 
         if (m.type === "stream_event") {
@@ -620,6 +658,11 @@ export async function startBridge(): Promise<number> {
           inheritedFrom: b?.inheritedFrom ?? null,
           parents: parents.get(task) ?? [],
           trail: trails.get(task) ?? [],
+          project: projectOf.get(task) ?? null,
+          projectName: projectNames.get(projectOf.get(task) ?? "") ?? "",
+          // Named rather than keyed, so the drawer can say "from project Foo"
+          // without knowing how the bridge keys its table.
+          inheritedName: b?.inheritedFrom ? sourceName(b.inheritedFrom) : null,
           sessionId: b?.sessionId ?? null,
           busy: !!run,
           // So a drawer that was closed mid-turn can show the prompt it missed.
@@ -696,6 +739,21 @@ export async function startBridge(): Promise<number> {
         if (names.length) trails.set(id, names);
         else trails.delete(id);
       }
+      // Which project the task is open inside, if the page is showing one.
+      if ("project" in payload) {
+        const project = typeof payload.project === "string" && /^\d+$/.test(payload.project) ? payload.project : "";
+        if (project) {
+          projectOf.set(id, project);
+          const pname = typeof payload.projectName === "string" ? payload.projectName.trim() : "";
+          if (pname && projectNames.get(project) !== pname) projectNames.set(project, pname);
+        } else {
+          // Opened from My Tasks or a feed, where nothing says which project
+          // it belongs to. Forgetting is right: a task's project is read from
+          // the page, never remembered from the last time it was on screen.
+          projectOf.delete(id);
+        }
+      }
+
       const title = typeof payload.title === "string" ? payload.title.trim() : "";
       const description = typeof payload.description === "string" ? plainText(payload.description) : "";
       if (!title && !description) {
@@ -709,6 +767,19 @@ export async function startBridge(): Promise<number> {
     }
 
     if (url.pathname === "/bind") {
+      /**
+       * Anchor the folder to the whole project rather than this one task, so
+       * every task opened inside that project inherits it. The project comes
+       * from the page, not from the operator: there is no project to anchor to
+       * unless one is actually open.
+       */
+      const whole = payload.scope === "project";
+      const project = whole ? projectOf.get(id) : undefined;
+      if (whole && !project) {
+        return json(400, { error: "No project is open for this task. Open it inside its project, or bind the task itself." });
+      }
+      const key = whole ? projectKey(project!) : id;
+
       const checked = checkDir(payload.workdir);
       if ("error" in checked) return json(400, { error: checked.error });
       const dirs = fenceDirs();
@@ -720,11 +791,25 @@ export async function startBridge(): Promise<number> {
           dirs,
         });
       }
-      const prev = bindings.get(id);
+      const prev = bindings.get(key);
       // The folder is part of a session's identity: a session started elsewhere
       // can't be resumed here, so moving the folder starts a new thread.
       const sessionId = prev && prev.workdir === checked.dir ? prev.sessionId : undefined;
-      bindings.set(id, { workdir: checked.dir, sessionId });
+      bindings.set(key, { workdir: checked.dir, sessionId });
+      if (whole) {
+        // This task may have its own folder, which still wins. Say so rather
+        // than let the header look as if nothing happened.
+        const own = bindings.get(id);
+        console.log(`[bridge] ${sourceName(key)} → ${checked.dir} (every task opened inside it)`);
+        const now = boundFor(id);
+        send(id, { type: "bound", workdir: now?.workdir ?? null, sessionId: now?.sessionId ?? null });
+        return json(200, {
+          project: project,
+          workdir: checked.dir,
+          anchored: true,
+          overridden: !!(own?.workdir && !own.from),
+        });
+      }
       console.log(`[bridge] task ${id} → ${checked.dir}${sessionId ? ` (session ${sessionId})` : " (new session)"}`);
       send(id, { type: "bound", workdir: checked.dir, sessionId: sessionId ?? null });
       return json(200, { task: id, workdir: checked.dir, sessionId: sessionId ?? null });
@@ -757,7 +842,7 @@ export async function startBridge(): Promise<number> {
       const b = bindings.get(id);
       if (!b) return json(404, { error: "that task has no folder bound" });
       if (runs.has(id)) return json(409, { error: "stop the running turn first" });
-      bindings.set(id, { workdir: b.workdir });
+      bindings.set(id, { workdir: b.workdir, from: b.from });
       console.log(`[bridge] task ${id} session cleared (folder kept: ${b.workdir})`);
       send(id, { type: "bound", workdir: b.workdir, sessionId: null });
       return json(200, { task: id, workdir: b.workdir, sessionId: null });
