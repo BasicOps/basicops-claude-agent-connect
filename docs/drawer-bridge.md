@@ -225,7 +225,7 @@ next piece.
 | `POST /context` | `{ task, title, description }` what the task says |
 | `POST /pick` | open a folder picker on the Mac, return the path |
 | `POST /allow` | `{ workdir }` add a folder to the drawer's own fence |
-| `POST /message` | `{ task, text }` run a turn |
+| `POST /message` | `{ task, text, interrupt }` run a turn |
 | `POST /approve` | `{ task, id, allow }` answer an approval |
 | `POST /reset` | `{ task }` forget the session, keep the folder |
 | `POST /stop` | `{ task }` abort the running turn |
@@ -233,6 +233,26 @@ next piece.
 `/message` returns 202 and the reply arrives on the task's SSE stream. Every
 refusal (no folder, already working, folder busy) comes back on the POST, not
 later on the stream.
+
+### Sending while it works
+
+`interrupt: true`, which the drawer always sends, stops this task's own turn
+and takes its place. Typing mid-turn is how you correct a turn that has gone
+the wrong way, and a correction is worth nothing delivered after the work it
+was meant to prevent. The drawer shows "Stopped." above your message, so what
+happened is on the record rather than inferred from a turn that ends early.
+
+Only this task's own run. A different task working in the same folder is
+somebody else's turn and still refuses, and so does a task with no folder.
+
+Aborting is a request, not an event: `runs` is cleared in `runTurn`'s `finally`,
+which comes round when the SDK's loop unwinds. So the bridge polls for up to 15
+seconds and answers 409 if the turn will not stop, rather than starting a second
+turn in the same folder. In testing a turn 4 files into a 15 file read accepted
+the interrupt in about a second.
+
+The Stop button is still there for stopping without saying anything, and is
+enabled only while a turn is running.
 
 ## What it does differently from the webhook listener
 

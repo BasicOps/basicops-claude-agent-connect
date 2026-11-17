@@ -502,6 +502,23 @@ export async function startBridge(): Promise<number> {
     return undefined;
   }
 
+  /**
+   * Wait for a task's run to clear, up to `ms`. True if it did.
+   *
+   * `runs` is deleted in `runTurn`'s `finally`, which only comes round once
+   * the SDK's loop has unwound, so an abort is a request rather than an event.
+   * Polling is honest about that, and the alternative, assuming the abort took,
+   * would start a second turn in the same folder as the first.
+   */
+  async function settled(task: string, ms: number): Promise<boolean> {
+    const until = Date.now() + ms;
+    while (runs.has(task)) {
+      if (Date.now() > until) return false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return true;
+  }
+
   async function runTurn(task: string, text: string) {
     const bound = boundFor(task)!;
     const abort = new AbortController();
@@ -913,6 +930,25 @@ export async function startBridge(): Promise<number> {
     if (url.pathname === "/message") {
       const text = String(payload.text ?? "").trim();
       if (!text) return json(400, { error: "text is required" });
+
+      /**
+       * Typing while it works is how you correct a turn that has gone the
+       * wrong way, and the correction is worth nothing after the work it was
+       * meant to prevent. So the message stops this task's own turn and takes
+       * its place, which is what the operator was asking for when they typed
+       * "stop" into the box three times and were told to stop it.
+       *
+       * Only this task's own run. Another task working in the same folder is
+       * somebody else's turn and still refuses.
+       */
+      const own = runs.get(id);
+      if (own && payload.interrupt) {
+        own.abort.abort();
+        if (!(await settled(id, 15_000))) {
+          return json(409, { error: "The turn won't stop. Give it a moment, then try again." });
+        }
+      }
+
       const why = blocked(id);
       if (why) return json(409, { error: why });
       remember(id, "you", text);

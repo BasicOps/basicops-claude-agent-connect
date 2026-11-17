@@ -689,7 +689,9 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     row("you", text);
     input.value = "";
     try {
-      await post("/message", { text });
+      // A message sent mid-turn stops that turn and takes its place. Waiting
+      // for work you are trying to prevent is the one thing it must not do.
+      await post("/message", { text, interrupt: true });
     } catch (e) {
       row("err", e.message);
     }
