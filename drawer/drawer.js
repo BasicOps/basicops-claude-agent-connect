@@ -44,8 +44,11 @@ const CSS = `
 @keyframes pulse { 50% { opacity: .25; } }
 .body { flex: 1; overflow-y: auto; padding: 12px; min-height: 0; }
 .row { margin: 0 0 10px; white-space: pre-wrap; word-break: break-word; }
-.row.you { color: var(--muted); }
-.row.you b { color: var(--fg); font-weight: 600; }
+/* Your own message, in a box like Claude's, so the turns read apart at a glance. */
+.row.you {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 8px 11px; margin: 2px 0 12px auto; max-width: 85%; width: fit-content;
+}
 .row.note { color: var(--muted); font-size: 12px; }
 .row.err { color: var(--err); }
 .row.tool { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; }
@@ -120,7 +123,9 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   };
 
   function row(kind, text, remember = true) {
-    const n = el("div", "row " + kind, text);
+    // Your own words were prefixed "You:" when every turn was plain text. The
+    // box says whose it is now, so the label would only be noise.
+    const n = el("div", "row " + kind, kind === "you" ? String(text).replace(/^You: /, "") : text);
     body.append(n);
     if (remember) log().push({ kind, text });
     scroll();
@@ -437,9 +442,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     const text = input.value.trim();
     if (!text || !current) return;
     body.querySelector(".empty")?.remove();
-    const n = row("you", "");
-    n.append(el("b", null, "You: "), document.createTextNode(text));
-    log()[log().length - 1] = { kind: "you", text: "You: " + text };
+    row("you", text);
     input.value = "";
     try {
       await post("/message", { text });
