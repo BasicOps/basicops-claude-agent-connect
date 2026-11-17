@@ -50,8 +50,21 @@ const CSS = `
   padding: 8px 11px; margin: 2px 0 12px auto; max-width: 85%; width: fit-content;
 }
 .row.note { color: var(--muted); font-size: 12px; }
+/* Claude's own replies: markdown, rendered. Blocks set their own spacing, so
+   the row's pre-wrap only has to hold line breaks inside a paragraph. */
+.row p, .row ul, .row ol, .row pre { margin: 0 0 10px; }
+.row > :last-child { margin-bottom: 0; }
+.row .md-h { font-weight: 600; margin: 15px 0 7px; }
+.row > .md-h:first-child { margin-top: 0; }
+.row ul, .row ol { padding-left: 20px; white-space: normal; }
+.row li { margin: 3px 0; }
+.row code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+.row pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; overflow-x: auto; white-space: pre; }
+.row pre code { background: none; border: 0; padding: 0; font-size: 12px; }
+.row a { color: var(--accent); }
+.row hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
 .row.err { color: var(--err); }
-.row.tool { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; }
+.row.tool { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; margin-bottom: 8px; }
 .ask { border: 1px solid currentColor; color: var(--warn); background: var(--warn-bg); border-radius: 8px; padding: 9px 10px; margin: 0 0 10px; }
 .ask .what { font-weight: 600; }
 .ask pre { margin: 6px 0; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow: auto; }
@@ -66,6 +79,121 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button:disabled { opacity: .5; cursor: default; }
 .empty { color: var(--muted); font-size: 13px; }
 `;
+
+/**
+ * Enough markdown to read a Claude turn.
+ *
+ * The model writes markdown whether or not anything renders it, so a reply
+ * full of backticks and asterisks was the alternative. Built out of DOM nodes
+ * rather than innerHTML: the text comes from a model that reads tasks, files
+ * and the web, and none of that should ever be able to put markup on screen.
+ */
+const MD_INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+
+function mdInline(text, into) {
+  let at = 0;
+  for (const m of text.matchAll(MD_INLINE)) {
+    if (m.index > at) into.append(text.slice(at, m.index));
+    const t = m[0];
+    if (t.startsWith("`")) into.append(el("code", null, t.slice(1, -1)));
+    else if (t.startsWith("**")) into.append(el("strong", null, t.slice(2, -2)));
+    else if (t.startsWith("*")) into.append(el("em", null, t.slice(1, -1)));
+    else {
+      const cut = t.indexOf("](");
+      const label = t.slice(1, cut);
+      const href = t.slice(cut + 2, -1);
+      // Anything but http(s) stays text: no javascript:, no data:.
+      if (/^https?:\/\//i.test(href)) {
+        const a = el("a", null, label);
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noreferrer noopener";
+        into.append(a);
+      } else into.append(t);
+    }
+    at = m.index + t.length;
+  }
+  if (at < text.length) into.append(text.slice(at));
+  return into;
+}
+
+function md(src) {
+  const out = document.createDocumentFragment();
+  const lines = String(src).split("\n");
+  let para = [];
+  let list = null; // the open <ul>/<ol>
+
+  const flush = () => {
+    if (para.length) out.append(mdInline(para.join("\n"), el("p")));
+    para = [];
+  };
+  const endList = () => {
+    if (list) out.append(list);
+    list = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (/^\s*```/.test(line)) {
+      flush();
+      endList();
+      const code = [];
+      for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) code.push(lines[i]);
+      const pre = el("pre");
+      pre.append(el("code", null, code.join("\n")));
+      out.append(pre);
+      continue;
+    }
+
+    const head = line.match(/^(#{1,6})\s+(.*)$/);
+    if (head) {
+      flush();
+      endList();
+      out.append(mdInline(head[2], el("div", "md-h")));
+      continue;
+    }
+
+    if (/^\s*([-*_])\s*\1\s*\1[-*_\s]*$/.test(line)) {
+      flush();
+      endList();
+      out.append(el("hr"));
+      continue;
+    }
+
+    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+    const number = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || number) {
+      flush();
+      const want = bullet ? "ul" : "ol";
+      if (!list || list.tagName.toLowerCase() !== want) {
+        endList();
+        list = el(want);
+      }
+      list.append(mdInline((bullet || number)[1], el("li")));
+      continue;
+    }
+
+    if (!line.trim()) {
+      flush();
+      endList();
+      continue;
+    }
+
+    // A plain line continues the paragraph, and continues a list item it is
+    // indented under rather than starting a paragraph mid-list.
+    if (list && /^\s{2,}\S/.test(line) && list.lastChild) {
+      list.lastChild.append("\n");
+      mdInline(line.trim(), list.lastChild);
+      continue;
+    }
+    endList();
+    para.push(line);
+  }
+  flush();
+  endList();
+  return out;
+}
 
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -109,6 +237,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   let current = null; // task id
   let stream = null; // EventSource
   let typing = null; // the row being streamed into
+  let typingRaw = ""; // its markdown source, kept because the DOM loses it
   let state = {};
   const history = new Map(); // task id -> [{ kind, text } | { ask }]
   let auth = token || localStorage.getItem("bo-drawer-token") || "";
@@ -125,7 +254,10 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   function row(kind, text, remember = true) {
     // Your own words were prefixed "You:" when every turn was plain text. The
     // box says whose it is now, so the label would only be noise.
-    const n = el("div", "row " + kind, kind === "you" ? String(text).replace(/^You: /, "") : text);
+    const n = el("div", "row " + kind, kind === "you" ? String(text).replace(/^You: /, "") : kind === "" ? null : text);
+    // A reply replayed from history is already whole, so it renders at once.
+    // A reply still streaming arrives empty here and settles below.
+    if (kind === "" && text) n.append(md(text));
     body.append(n);
     if (remember) log().push({ kind, text });
     scroll();
@@ -328,6 +460,13 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     foot.prepend(wrap);
   }
 
+  /** The streamed reply is done: render its markdown in place. */
+  function settle() {
+    if (typing && typingRaw.trim()) typing.replaceChildren(md(typingRaw));
+    typing = null;
+    typingRaw = "";
+  }
+
   function open() {
     stream?.close();
     stream = new EventSource(`${bridge}/events?task=${encodeURIComponent(current)}&t=${encodeURIComponent(auth)}`);
@@ -340,24 +479,30 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     stream.onmessage = (e) => {
       const ev = JSON.parse(e.data);
       if (ev.type === "text") {
-        if (!typing) typing = row("", "");
-        typing.textContent += ev.text;
+        if (!typing) {
+          typing = row("", "");
+          typingRaw = "";
+        }
+        // Plain text while it streams: half a fence or half a bullet renders
+        // as a flicker of wrong shapes. It settles into markdown at the end.
+        typingRaw += ev.text;
+        typing.textContent = typingRaw;
         const entries = log();
         const last = entries[entries.length - 1];
-        if (last && last.kind === "") last.text = typing.textContent;
+        if (last && last.kind === "") last.text = typingRaw;
         scroll();
       } else if (ev.type === "tool") {
-        typing = null;
+        settle();
         row("tool", ev.name + " " + summarise(ev.input).split("\n")[0].slice(0, 160));
       } else if (ev.type === "ask") {
-        typing = null;
+        settle();
         askCard(ev);
       } else if (ev.type === "bound") {
         state.workdir = ev.workdir;
         state.sessionId = ev.sessionId;
         paint();
       } else if (ev.type === "turn") {
-        typing = null;
+        settle();
         if (ev.state === "start") {
           state.busy = true;
           paint();
@@ -411,6 +556,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     setHeading(id, name);
     current = id;
     typing = null;
+    typingRaw = "";
     state = {};
     body.replaceChildren();
     root.querySelector(".bindrow")?.remove();
