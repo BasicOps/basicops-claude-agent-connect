@@ -350,11 +350,26 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   }
 
   async function post(path, payload) {
-    const res = await fetch(bridge + path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + auth },
-      body: JSON.stringify({ task: current, ...payload }),
-    });
+    let res;
+    try {
+      res = await fetch(bridge + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + auth },
+        body: JSON.stringify({ task: current, ...payload }),
+      });
+    } catch {
+      // `fetch` reports every connection failure as "Failed to fetch", which
+      // tells you nothing and reads like the drawer is broken. Nearly always
+      // the bridge simply is not running: it dies with the terminal tab it
+      // was started in. Say which host, so the answer is obvious.
+      let host = bridge;
+      try {
+        host = new URL(bridge).host;
+      } catch {
+        // A relative bridge URL. The whole string is a fine thing to name.
+      }
+      throw new Error(`The bridge at ${host} isn't answering. Start it with \`npm run bridge\` and try again.`);
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.error || res.statusText);
