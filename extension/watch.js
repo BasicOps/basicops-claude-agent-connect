@@ -19,14 +19,26 @@
   let sentId = null;
   let sentText = null;
 
+  /** Laid out, so `display: none` is out but a fixed overlay is in. */
+  function shown(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 || r.height > 0;
+  }
+
   /**
-   * The open task's name, straight off the page. One `.task-title` is on
-   * screen at a time and it belongs to the task the URL names, so this is the
-   * same thing you are looking at. Simpler and more reliable than fishing the
-   * title out of a socket frame, and it is what the drawer shows you.
+   * The open task's name, straight off the page.
+   *
+   * There is one `.task-title` per open panel, not one per screen. Open a task
+   * over a list and the list's own task-details stays behind it, in the DOM
+   * and laid out, so `querySelector` returns the task you are NOT looking at.
+   * That is how task 2223328 "Campaign 5 of 8" came to be recorded under the
+   * name of the task on top of it, and 2223327 under the name of the list
+   * underneath. A panel is appended after whatever it covers, so the last one
+   * laid out is the one on top.
    */
   function titleFromDom() {
-    const el = document.querySelector(".task-title");
+    const all = [...document.querySelectorAll(".task-title")].filter(shown);
+    const el = all[all.length - 1];
     const text = el ? (el.textContent || "").trim() : "";
     return text.length > 200 ? text.slice(0, 200) : text;
   }
@@ -41,7 +53,14 @@
    * bridge matches them against the task names it has already been told.
    */
   function trailFromDom() {
-    return [...document.querySelectorAll(".breadcrumb .breadcrumb-link")]
+    // One `.breadcrumb` per open panel, like the title, so take the top one's
+    // alone. Running them together put the covered panel's project at the head
+    // of the chain, which is both the wrong project name on the drawer and a
+    // foreign name offered to the bridge to inherit a folder from.
+    const bars = [...document.querySelectorAll(".breadcrumb")].filter(shown);
+    const bar = bars[bars.length - 1];
+    if (!bar) return [];
+    return [...bar.querySelectorAll(".breadcrumb-link")]
       .map((el) => (el.textContent || "").trim())
       .filter((s) => s && s.length <= 200);
   }
@@ -79,11 +98,25 @@
    * from its parent leaves both in the `ol-` parameter, so this is the parent
    * chain, already on screen and needing no API call.
    */
-  function overlayStack() {
+  /** The `ol-` parameter's text, or "" when nothing is open over the page. */
+  function overlayParam() {
     const ol = location.href.match(/[?&](ol-[^#&]*)/);
+    return ol ? ol[1] : "";
+  }
+
+  function overlayStack() {
+    const ol = overlayParam();
     if (!ol) return [];
-    const ids = [...ol[1].matchAll(/\/3936\.(\d+)/g)].map((m) => m[1]);
+    const ids = [...ol.matchAll(/\/3936\.(\d+)/g)].map((m) => m[1]);
     return ids.filter((id, i) => id !== "0" && ids.indexOf(id) === i);
+  }
+
+  /**
+   * Every `/list/l<id>/` in a stretch of URL, in order. `l0` is BasicOps's
+   * placeholder rather than a task, and the dashboard path is full of them.
+   */
+  function listIds(where) {
+    return [...where.matchAll(/\/list\/l(\d+)(?:\/|$)/g)].map((m) => m[1]).filter((id) => id !== "0");
   }
 
   /** The open task's ancestors, nearest parent first. */
@@ -102,24 +135,56 @@
    * `v<view>-<project>` segment is the fallback, for views that do not end in
    * the project.
    *
-   * The same task opened through My Tasks has neither, and reports no project.
-   * That is correct rather than a gap: nothing on screen says which project it
-   * belongs to, and guessing one would bind a folder on a hunch.
+   * The overlay comes first, for the same reason the task id does: with a task
+   * open over a list, the path names the project of the task underneath, not
+   * the one you are looking at. An overlay names its project as `3934.<id>`,
+   * or carries the same `a<id>` and `v<view>-<project>` forms itself. Anchoring
+   * a folder to the wrong project is worse than anchoring to none, so when
+   * something is open and names no project, this reports none.
+   *
+   * A task opened through My Tasks also reports no project, and that is
+   * correct rather than a gap: nothing on screen says which project it belongs
+   * to, and guessing one would bind a folder on a hunch.
    */
+  function projectIn(where) {
+    const over = [...where.matchAll(/\/3934\.(\d+)/g)].map((m) => m[1]).filter((id) => id !== "0");
+    if (over.length) return over[over.length - 1];
+    const tail = [...where.matchAll(/\/projects\/a(\d+)(?:\/|$)/g)].map((m) => m[1]);
+    if (tail.length) return tail[tail.length - 1];
+    const head = [...where.matchAll(/\/c\/v\d+-(\d+)(?:\/|$)/g)].map((m) => m[1]);
+    return head.length ? head[head.length - 1] : null;
+  }
+
   function projectFromUrl() {
-    const tail = location.pathname.match(/\/projects\/a(\d+)(?:\/|$)/);
-    if (tail) return tail[1];
-    const head = location.pathname.match(/\/c\/v\d+-(\d+)(?:\/|$)/);
-    return head ? head[1] : null;
+    const ol = overlayParam();
+    if (ol) return projectIn(ol);
+    return projectIn(location.pathname);
   }
 
   function taskFromUrl() {
     const stack = overlayStack();
     if (stack.length) return stack[stack.length - 1];
-    // `l0` is BasicOps's placeholder, not a task: the dashboard path is full
-    // of them. Without this the drawer binds to a task called 0.
-    const route = location.pathname.match(/\/list\/l(\d+)\//);
-    if (route && route[1] !== "0") return route[1];
+
+    const ol = overlayParam();
+    if (ol) {
+      // An overlay does not always name its task as `3936.<id>`. Open a
+      // project over a list and it carries its own `/list/l<id>/` instead:
+      //
+      //   /…/list/l1972055/…/projects/a64411?ol-…/3934.69167/…/list/l2200151/…
+      //
+      // The task on screen is 2200151. The path's l1972055 is the task the
+      // overlay is covering, and reading it here is how the drawer walked off
+      // to a task in the background, which has no folder and no session of
+      // its own, so the task you were working on looked like it had lost one.
+      const inside = listIds(ol);
+      if (inside.length) return inside[inside.length - 1];
+      // Something is open over the page and nothing in the URL says what.
+      // Better no task than the one underneath it.
+      return null;
+    }
+
+    const own = listIds(location.pathname);
+    if (own.length) return own[own.length - 1];
     const l = new URLSearchParams(location.search).get("l");
     if (l) {
       const parts = l.split("_").filter(Boolean);

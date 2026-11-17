@@ -71,23 +71,43 @@
    *  1. A task open over a list: `?ol-…/3936.2221868/…`. The path still names
    *     the list's own task (`/list/l2221477/`) and the page title still names
    *     that one too, so anything that reads the path here is simply wrong.
-   *  2. A plain task route: `/list/l2221666/v95673-2221666/task-details/…`.
-   *  3. A share link: `?l=_<ws>_31C_<token>`, the id in base 36 with six more
+   *  2. An overlay that names no task of its own, because it is a project
+   *     opened over a list. It carries its own `/list/l<id>/` inside the same
+   *     `ol-` parameter, and that is the task on screen:
+   *
+   *       /…/list/l1972055/…?ol-…/3934.69167/…/list/l2200151/…
+   *              ^ covered                        ^ open
+   *
+   *  3. A plain task route: `/list/l2221666/v95673-2221666/task-details/…`,
+   *     read only when nothing is open over it.
+   *  4. A share link: `?l=_<ws>_31C_<token>`, the id in base 36 with six more
    *     characters after it. Checked against 50 real tasks.
    *
-   * All three are reverse-engineered from somebody else's URLs, which is why
+   * All of them are reverse-engineered from somebody else's URLs, which is why
    * the drawer shows the task name beside the id. In the app none of this
    * exists: the app knows the task and passes it in.
    */
   function taskFromUrl() {
-    const href = location.href;
-    // 1. the overlay wins: it is what's actually on screen
-    const overlay = href.match(/[?&]ol-[^#]*?\/3936\.(\d+)/);
-    if (overlay) return overlay[1];
-    // 2. the plain route
-    const route = location.pathname.match(/\/list\/l(\d+)\//);
-    if (route) return route[1];
-    // 3. the share link
+    // Every `/list/l<id>/`, in order. `l0` is a placeholder, not a task.
+    const lists = (where) =>
+      [...where.matchAll(/\/list\/l(\d+)(?:\/|$)/g)].map((m) => m[1]).filter((id) => id !== "0");
+
+    const ol = location.href.match(/[?&](ol-[^#&]*)/);
+    if (ol) {
+      // 1. the overlay wins: it is what's actually on screen
+      const ids = [...ol[1].matchAll(/\/3936\.(\d+)/g)].map((m) => m[1]).filter((id) => id !== "0");
+      if (ids.length) return ids[ids.length - 1];
+      // 2. the overlay's own list
+      const inside = lists(ol[1]);
+      if (inside.length) return inside[inside.length - 1];
+      // Something is open and nothing says what. The task underneath is a
+      // real, plausible, wrong answer, so give none instead.
+      return null;
+    }
+    // 3. the plain route
+    const own = lists(location.pathname);
+    if (own.length) return own[own.length - 1];
+    // 4. the share link
     const l = new URLSearchParams(location.search).get("l");
     if (l) {
       const parts = l.split("_").filter(Boolean);

@@ -133,9 +133,19 @@ Project names are kept in `bridge.projects.json`, only so the drawer can say
 ### The task's name
 
 The drawer shows the task's name, with its number as small print. The name is
-read from the page's one visible `.task-title`, which belongs to the task the
-URL names. Simpler than fishing it out of a socket frame, and it is the same
-text you are looking at, which is the point: a wrong task is visible.
+read off the page, which is the point: a wrong task is visible.
+
+There is **one `.task-title` per open panel, not one per screen**. Open a task
+over a list and the list's own task-details stays behind it, in the DOM and
+still laid out, so `querySelector(".task-title")` returns the task you are not
+looking at. The same goes for `.breadcrumb`: each panel has its own, and
+running them together put a covered panel's project at the head of the chain.
+Both now take the last one laid out, which is the panel on top.
+
+That assumption cost real data. With "Refine Copy" open over "Campaign 5 of
+8", the bridge recorded each task under the other's name, and the breadcrumb
+offered a foreign project's name to inherit a folder from. Verified against
+the live app: two `.task-title` nodes, both laid out, the first one wrong.
 
 ### The conversation survives a reload
 
@@ -400,10 +410,31 @@ inside the `ol-` query parameter:
        ^ not the open task                              ^ the open task
 ```
 
-`drawer/inject.js` handles all three (overlay first, then the plain
-`/list/l<id>/` route, then the `?l=` share link, whose token is the id in base
-36 with six more characters; checked against 50 real tasks). It gets the live
-app right.
+There is a fourth shape, and it is the one that bites. An overlay does not
+always name its task as `3936.<id>`: open a project over a list and the
+overlay carries **its own `/list/l<id>/`** instead, inside the same `ol-`
+parameter:
+
+```
+/…/list/l1972055/…/projects/a64411?ol-…/3934.69167/…/list/l2200151/…
+       ^ the covered task        ^ its project          ^ the open task
+```
+
+With no `3936.` to find, anything that then falls back to the path reads
+`l1972055`, a task in another project entirely, and `a64411` with it. That is
+how the drawer walked off to a task in the background: a task with no folder
+and no session of its own, so the one you were working on looked like it had
+lost its session. Nothing was actually lost, which is the tell for this bug
+rather than a real one: the binding and the Claude transcript were both still
+on disk the whole time.
+
+So the open task, and its project, are read from the **overlay first, always**,
+and from the path only when nothing is open over it. When something is open
+and names no task, the answer is no task: the one underneath is worse than
+none. `drawer/inject.js` handles the shapes in that order (overlay `3936.`,
+then the overlay's own list, then the plain `/list/l<id>/` route, then the `?l=`
+share link, whose token is the id in base 36 with six more characters; checked
+against 50 real tasks).
 
 But read that again: the obvious signals point at a **neighbouring real task**,
 not at nothing. A wrong read binds a session to a plausible wrong task rather
