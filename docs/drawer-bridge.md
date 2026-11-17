@@ -102,6 +102,20 @@ read from the page's one visible `.task-title`, which belongs to the task the
 URL names. Simpler than fishing it out of a socket frame, and it is the same
 text you are looking at, which is the point: a wrong task is visible.
 
+### How a turn reads
+
+Your own message sits in a box, the way it does in Claude's own chat. Claude's
+replies are rendered markdown: headings, lists, bold, inline code, fenced
+blocks, rules and http links.
+
+The renderer builds DOM nodes and never touches `innerHTML`. The text comes
+from a model that reads tasks, files and the web, so nothing in it is allowed
+to become markup. Links that are not `http` or `https` stay as plain text.
+
+Rendering happens when the turn settles, not while it streams. Half a fence or
+half a bullet renders as a flicker of wrong shapes, so the text streams plain
+and turns into markdown at the end.
+
 ## Putting the drawer in the app
 
 ```js
