@@ -283,3 +283,50 @@ export function loadCapabilities(agent: string): AgentCapabilities {
 
   return { mcpServers, plugins, allowedTools, instructions, vault, workplaceRules, listenChannels, onlyUsers, basicopsReadOnly, operatorBasicops, chrome, claudeAiConnectors, claudeCodePath, coding, proactive };
 }
+
+/** Where the agent's environment file lives, beside its JSON config. */
+export function envPath(agent: string): string {
+  return join(homedir(), ".config", "basicops-agent", `${agentSlug(agent)}.env`);
+}
+
+/**
+ * The agent's own environment, from `<slug>.env`.
+ *
+ * The launchd job that runs this agent as a BasicOps listener sources that
+ * file before exec:
+ *
+ *   set -a; . "~/.config/basicops-agent/roy-claude.env"; set +a; exec node …
+ *
+ * so a listener run has `CPV_TOKEN` and friends, and anything started by hand
+ * does not. The agent's skills reach for those tokens either way, so the
+ * drawer inherited the agent's servers, plugins, connectors and instructions
+ * and then failed at the one step that needed a credential, truthfully
+ * reporting that no token was set. Reading the same file here closes that gap.
+ *
+ * Deliberately flat: `KEY=value`, `#` comments, optional `export`, optional
+ * surrounding quotes. No `$VAR` expansion and no command substitution, so a
+ * file that leans on either will differ from what the listener sees. Missing
+ * file is normal and means no extra environment.
+ */
+export function loadAgentEnv(agent: string): Record<string, string> {
+  let raw: string;
+  try {
+    raw = readFileSync(envPath(agent), "utf8");
+  } catch (e: any) {
+    if (e?.code === "ENOENT") return {};
+    throw new Error(`Could not read ${envPath(agent)}: ${e.message}`);
+  }
+  const env: Record<string, string> = {};
+  for (const line of raw.split("\n")) {
+    const text = line.trim();
+    if (!text || text.startsWith("#")) continue;
+    const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(text);
+    if (!m) continue;
+    let value = m[2].trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    env[m[1]] = value;
+  }
+  return env;
+}

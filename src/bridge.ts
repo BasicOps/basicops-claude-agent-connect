@@ -39,7 +39,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query, type PermissionResult, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { connectorPrefix, connectorsForTurn, resolveClaudeExecutable } from "./connectors.js";
-import { loadCapabilities } from "./config.js";
+import { loadCapabilities, loadAgentEnv } from "./config.js";
 import { basicopsReadOnlyHook, expandHome, fenceHook, fenceRoots, workplaceLock } from "./fence.js";
 import { RuleBook } from "./rules.js";
 import { PersistedMap, sessionExists } from "./state.js";
@@ -259,6 +259,12 @@ export async function startBridge(): Promise<number> {
   // bridge's own config where it is set, and falls back to the agent's.
   const caps = cfg.agent ? loadCapabilities(cfg.agent) : undefined;
   const rules = caps ? new RuleBook(caps.vault, caps.workplaceRules) : undefined;
+  /**
+   * The agent's own environment, which its launchd job sources and a bridge
+   * started by hand does not. Without it the drawer runs the agent's skills
+   * with none of the agent's credentials.
+   */
+  const agentEnv = cfg.agent ? loadAgentEnv(cfg.agent) : {};
   /**
    * The fence: the agent's folders as a starting point, the bridge's own
    * config, and whatever the operator has since added from the drawer.
@@ -594,7 +600,11 @@ export async function startBridge(): Promise<number> {
           // approval. `--setting-sources` also stops claude.ai connectors
           // loading at all, so when some are allowed we pass the env instead
           // and let the hook do the gating.
-          ...(connectors.length ? { env: conn.env } : { settingSources: [] as [] }),
+          // The agent's own environment goes either way: its skills need the
+          // same credentials whether or not connectors are in play.
+          ...(connectors.length
+            ? { env: { ...conn.env, ...agentEnv } }
+            : { settingSources: [] as [], env: { ...process.env, ...agentEnv } as Record<string, string> }),
           stderr: (d: string) => {
             const line = d.trim();
             if (line) console.error(`  [claude stderr] ${line}`);
@@ -956,6 +966,10 @@ export async function startBridge(): Promise<number> {
       console.log(`[bridge] folders: ${allowedDirs.length ? allowedDirs.join(", ") : "(any, set allowedDirs in bridge.json to fence it)"}`);
       if (added.size) console.log(`[bridge]   ${added.size} of those you added from the drawer`);
       console.log(`[bridge] agent: ${cfg.agent ?? "(none, the drawer has its own capabilities)"}`);
+      // Names only. A value here would be a credential in a log the operator
+      // reads over somebody's shoulder.
+      const envNames = Object.keys(agentEnv);
+      if (envNames.length) console.log(`[bridge] agent env: ${envNames.join(", ")}`);
       if (caps) {
         const servers = Object.keys(caps.mcpServers ?? {});
         console.log(`[bridge] mcp servers: ${servers.length ? servers.join(", ") : "none"}`);
