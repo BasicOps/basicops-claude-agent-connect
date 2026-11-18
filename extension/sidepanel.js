@@ -11,7 +11,16 @@ import { mountDrawer } from "./drawer.js";
 
 const BRIDGE = (await chrome.storage.local.get("bridge")).bridge || "http://127.0.0.1:4710";
 
-const drawer = mountDrawer({ bridge: BRIDGE, mount: document.getElementById("drawer") });
+let drawer;
+try {
+  drawer = mountDrawer({ bridge: BRIDGE, mount: document.getElementById("drawer") });
+} catch (e) {
+  // Say so in the panel rather than leaving a white box. Without this the
+  // only evidence is in a devtools window for the panel, which you have to
+  // know exists before you can open it.
+  window.__oops?.(e?.stack || String(e));
+  throw e;
+}
 
 const notice = document.getElementById("notice");
 document.getElementById("reload").onclick = async () => {

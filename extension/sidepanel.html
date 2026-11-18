@@ -12,11 +12,31 @@
                 background: #fff4e5; color: #7a4a00; border-bottom: 1px solid #f0d8b0; }
       #notice button { margin-left: 6px; font: inherit; cursor: pointer; }
       @media (prefers-color-scheme: dark) { #notice { background: #3a2d14; color: #f0c674; border-bottom-color: #55431d; } }
+      /* Anything that stops the panel drawing itself. A side panel that fails
+         goes blank, and the error lands in a devtools window you have to know
+         to open: from the outside the extension has simply stopped working. */
+      #oops { display: none; padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+              font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+              background: #fdeaea; color: #8a1f1f; border-bottom: 1px solid #f0c0c0; }
+      @media (prefers-color-scheme: dark) { #oops { background: #3a1a1a; color: #ff9a92; border-bottom-color: #5a2626; } }
     </style>
   </head>
   <body>
+    <div id="oops"></div>
     <div id="notice">This tab's watcher was stopped when the extension reloaded, so the drawer can't see which task is open.<button id="reload">Reload the tab</button></div>
     <div id="drawer"></div>
+    <script>
+      // Inline and first, so it catches a failure in the module below,
+      // including one that stops it being parsed at all.
+      window.__oops = (what) => {
+        const box = document.getElementById("oops");
+        if (!box) return;
+        box.style.display = "block";
+        box.textContent = "The drawer couldn't start.\n\n" + what;
+      };
+      addEventListener("error", (e) => window.__oops((e.error && e.error.stack) || e.message || String(e)));
+      addEventListener("unhandledrejection", (e) => window.__oops((e.reason && e.reason.stack) || String(e.reason)));
+    </script>
     <script type="module" src="sidepanel.js"></script>
   </body>
 </html>
