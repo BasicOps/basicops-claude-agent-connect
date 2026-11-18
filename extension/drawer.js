@@ -79,6 +79,10 @@ const CSS = `
 .bar .empty { flex-basis: 100%; }
 .bar .whole { flex-basis: 100%; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; cursor: pointer; }
 .bar .whole input { width: auto; flex: none; margin: 0; }
+.bar .lock { display: flex; gap: 5px; align-items: center; color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.bar .lock input { width: auto; flex: none; margin: 0; }
+.bar .lock.on { color: var(--accent); }
+.bar .lock:has(input:disabled) { opacity: .5; cursor: default; }
 textarea, input { font: inherit; width: 100%; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px 9px; }
 textarea { resize: vertical; min-height: 60px; }
 button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 7px; padding: 7px 11px; cursor: pointer; }
@@ -333,8 +337,14 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   const tray = el("div", "tray");
   const send = el("button", "primary", "Send");
   const stop = el("button", null, "Stop");
+  // Pin the panel to the task that's open now, so you can go and look at
+  // something else without the panel following you off a running turn.
+  const lock = el("label", "lock");
+  const lockBox = el("input");
+  lockBox.type = "checkbox";
+  lock.append(lockBox, document.createTextNode(" Lock to task"));
   const bar = el("div", "bar");
-  bar.append(send, stop);
+  bar.append(send, stop, lock);
   foot.append(tray, input, bar);
   d.append(head, body, foot);
   root.append(d);
@@ -347,6 +357,10 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   let state = {};
   const history = new Map(); // task id -> [{ kind, text } | { ask }]
   let auth = token || localStorage.getItem("bo-drawer-token") || "";
+  // Locked to the task it is on, ignoring the app. `latest` is what the app
+  // last said was open, so unlocking can catch up in one step.
+  let locked = false;
+  let latest = null;
 
   const log = () => {
     if (!history.has(current)) history.set(current, []);
@@ -457,11 +471,17 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     // a task or a project.
     if (state.inheritedName) bits[bits.length - 1] += " (from " + state.inheritedName + ")";
     if (state.sessionId) bits.push("session " + state.sessionId.slice(0, 8));
+    // Said in the header too, not just on the checkbox: while you are off
+    // looking at another task, this line is the only thing explaining why the
+    // panel is showing one you are not on.
+    if (locked) bits.push("locked");
     meta.textContent = bits.join(" · ");
     meta.title = state.workdir || "";
     dot.className = "dot" + (state.busy ? " busy" : "");
     send.disabled = !current || !state.workdir;
     stop.disabled = !state.busy;
+    lockBox.disabled = !current;
+    lock.className = "lock" + (locked ? " on" : "");
   }
 
   async function refresh() {
@@ -687,6 +707,40 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     label.textContent = "";
   }
 
+  /**
+   * What the app says is open. Every caller outside this file comes through
+   * here: the extension's watcher, the injected script, the demo page.
+   *
+   * While the panel is locked this only takes a note of it. A turn is a
+   * conversation with one task's session in one folder, and the reason to go
+   * and look at another task mid-turn is usually to answer a question the turn
+   * raised. Following the browser there throws the conversation off screen,
+   * and coming back meant waiting for the panel to notice.
+   */
+  function reportTask(id, name, description, lineage) {
+    latest = { id: id == null ? null : String(id), name, description, lineage };
+    if (locked) return;
+    setTask(id, name, description, lineage);
+  }
+
+  lockBox.onchange = () => {
+    if (lockBox.checked && !current) {
+      lockBox.checked = false;
+      return;
+    }
+    locked = lockBox.checked;
+    if (locked) {
+      row("note", "Locked to this task. Browsing elsewhere won't move the panel.", false);
+    } else if (latest && latest.id !== current) {
+      // Catch up in one step, rather than waiting for the app to say the same
+      // thing again. It only re-reports when something changes, and sitting on
+      // a task you have already left is exactly what unlocking is meant to end.
+      setTask(latest.id, latest.name, latest.description, latest.lineage);
+      return;
+    }
+    paint();
+  };
+
   function setTask(id, name, description, lineage) {
     id = id == null ? null : String(id);
     if (id === current) {
@@ -879,7 +933,7 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
 
   return {
     element: host,
-    setTask,
+    setTask: reportTask,
     destroy() {
       stream?.close();
       host.remove();

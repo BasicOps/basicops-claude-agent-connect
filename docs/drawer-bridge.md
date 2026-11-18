@@ -208,6 +208,24 @@ will refuse the calls.
 Try it at `/demo`: a pretend BasicOps with three tasks, mounting the same
 module the real app would.
 
+### Lock to task
+
+The checkbox by Send pins the panel to the task that's open now. While it is
+ticked, `setTask` only takes a note of what the app reports: the session, the
+stream and a running turn are left alone. Untick it and the panel catches up
+to wherever you have got to, in one step rather than waiting for the app to
+report the same task again.
+
+A turn is a conversation with one task's session in one folder, and the usual
+reason to go and look at another task mid-turn is to answer something the turn
+asked you. Without this the panel follows the browser and throws that
+conversation off screen. The header says `locked` alongside the task number,
+because while you are off looking at something else that line is the only thing
+explaining why the panel is showing a task you are not on.
+
+It can't be ticked with no task open, and it is per panel, not remembered: a
+reload comes back unlocked and following the app.
+
 Transcripts are kept in memory per task, so switching away and back shows the
 conversation again. A page reload loses them: the bridge streams turns, it
 doesn't store them. The durable record belongs in the task thread, which is the
