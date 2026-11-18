@@ -13,7 +13,7 @@
  *   GET  /history?task=&t=      what the drawer has shown for this task
  *   GET  /events?task=&t=       SSE: text, tool, ask, turn, error
  *   POST /bind                  { task, workdir }      bind the task's folder
- *   POST /message               { task, text }         run a turn
+ *   POST /message               { task, text, images }  run a turn
  *   POST /approve               { task, id, allow }     answer an approval
  *   POST /reset                 { task }               forget the session, keep the folder
  *   POST /stop                  { task }               abort the running turn
@@ -169,14 +169,53 @@ function loadConfig(): BridgeConfig {
   return cfg;
 }
 
+/** A pasted image: base64, already a type the model accepts. */
+type Shot = { media_type: string; data: string };
+
+/** What the model takes. Anything else the drawer re-encodes before sending. */
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MOST_IMAGES = 8;
+const BIGGEST_IMAGE = 4_000_000; // bytes, decoded
+
+/**
+ * The images off a `/message`, checked.
+ *
+ * Checked here rather than trusted, because this is the one place a drawer
+ * hands the bridge bulk data: a bad media type is a turn that dies inside the
+ * SDK with nothing on screen to explain it, and no cap is a 200MB paste.
+ */
+function shots(raw: unknown): Shot[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new Error("images must be an array");
+  if (raw.length > MOST_IMAGES) throw new Error(`${raw.length} images is too many; ${MOST_IMAGES} at a time.`);
+  return raw.map((one: any, i) => {
+    const media_type = String(one?.media_type ?? "");
+    const data = String(one?.data ?? "");
+    if (!IMAGE_TYPES.has(media_type)) throw new Error(`image ${i + 1} is ${media_type || "untyped"}; PNG, JPEG, GIF or WebP only.`);
+    if (!data) throw new Error(`image ${i + 1} has no data`);
+    if (!/^[A-Za-z0-9+/=\s]+$/.test(data)) throw new Error(`image ${i + 1} is not base64`);
+    // base64 carries 3 bytes in every 4 characters.
+    if (data.length * 0.75 > BIGGEST_IMAGE) throw new Error(`image ${i + 1} is over ${BIGGEST_IMAGE / 1e6}MB. Scale it down first.`);
+    return { media_type, data: data.replace(/\s+/g, "") };
+  });
+}
+
 /**
  * The operator's message as streaming input: one user message, then the input
  * closes so the turn ends. A plain string prompt would run the CLI in one-shot
  * mode, where it emits no partial messages (and exits non-zero if you ask for
  * them), so the drawer would only see the reply once it was finished.
+ *
+ * Pasted images ride on the same message as content blocks, ahead of the words,
+ * which is the order the model reads best: the picture, then what to do with
+ * it. Nothing is written to disk, so no image has to clear the folder fence to
+ * be looked at.
  */
-async function* oneTurn(text: string): AsyncGenerator<SDKUserMessage> {
-  yield { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: "" } as SDKUserMessage;
+async function* oneTurn(text: string, images: Shot[] = []): AsyncGenerator<SDKUserMessage> {
+  const content: any = images.length
+    ? [...images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.media_type, data: img.data } })), { type: "text", text }]
+    : text;
+  yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null, session_id: "" } as SDKUserMessage;
 }
 
 /** The installed Claude Code binary, or undefined if there isn't one on PATH. */
@@ -519,7 +558,7 @@ export async function startBridge(): Promise<number> {
     return true;
   }
 
-  async function runTurn(task: string, text: string) {
+  async function runTurn(task: string, text: string, images: Shot[] = []) {
     const bound = boundFor(task)!;
     const abort = new AbortController();
     if (bound.inheritedFrom) console.log(`[bridge] task ${task} works in ${bound.workdir} (${sourceName(bound.inheritedFrom)}'s folder)`);
@@ -555,7 +594,7 @@ export async function startBridge(): Promise<number> {
       for await (const m of query({
         // Streaming input (a generator, not a string) is what lets the CLI emit
         // partial messages, so the drawer gets text as it is written.
-        prompt: oneTurn(text),
+        prompt: oneTurn(text, images),
         options: {
           resume,
           cwd: bound.workdir,
@@ -680,7 +719,10 @@ export async function startBridge(): Promise<number> {
       let raw = "";
       req.on("data", (c) => {
         raw += c;
-        if (raw.length > 1_000_000) rej(new Error("body too large"));
+        // A megabyte was plenty for text. A pasted screenshot is not text:
+        // base64 adds a third again, and the per-image cap above is what
+        // actually keeps a turn sane. This only has to be bigger than that.
+        if (raw.length > MOST_IMAGES * BIGGEST_IMAGE * 1.4) rej(new Error("body too large"));
       });
       req.on("end", () => {
         try {
@@ -929,7 +971,16 @@ export async function startBridge(): Promise<number> {
 
     if (url.pathname === "/message") {
       const text = String(payload.text ?? "").trim();
-      if (!text) return json(400, { error: "text is required" });
+      let images: Shot[];
+      try {
+        images = shots(payload.images);
+      } catch (e: any) {
+        return json(400, { error: e.message });
+      }
+      // A screenshot on its own is a real message: "look at this". The model
+      // needs something in the text block, so say what was actually sent.
+      const words = text || (images.length ? (images.length === 1 ? "Have a look at this image." : `Have a look at these ${images.length} images.`) : "");
+      if (!words) return json(400, { error: "text is required" });
 
       /**
        * Typing while it works is how you correct a turn that has gone the
@@ -952,8 +1003,12 @@ export async function startBridge(): Promise<number> {
       const why = blocked(id);
       if (why) return json(409, { error: why });
       remember(id, "you", text);
+      // The scrollback is text, and these images are never written anywhere,
+      // so a replay can only say one came with the message. Better than a
+      // reply about a screenshot sitting under a message that mentions none.
+      if (images.length) remember(id, "note", images.length === 1 ? "With one pasted image." : `With ${images.length} pasted images.`);
       // Run in the background: the reply arrives on the task's SSE stream.
-      runTurn(id, text).catch((e) => send(id, { type: "turn", state: "error", error: e.message }));
+      runTurn(id, words, images).catch((e) => send(id, { type: "turn", state: "error", error: e.message }));
       return json(202, { task: id, accepted: true });
     }
 

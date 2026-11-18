@@ -85,6 +85,19 @@ button { font: inherit; border: 1px solid var(--line); background: var(--card); 
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
 button:disabled { opacity: .5; cursor: default; }
 .empty { color: var(--muted); font-size: 13px; }
+/* Pasted images: waiting to be sent, and sent. */
+.tray { display: flex; gap: 6px; flex-wrap: wrap; }
+.tray:empty { display: none; }
+.shot { position: relative; line-height: 0; }
+.shot img { width: 64px; height: 64px; object-fit: cover; border: 1px solid var(--line); border-radius: 7px; display: block; }
+.shot .x {
+  position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0;
+  border-radius: 50%; background: var(--bg); color: var(--muted);
+  font: 12px/16px ui-sans-serif, sans-serif; text-align: center;
+}
+.row .shots { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 6px; }
+.row .shots img { max-width: 160px; max-height: 160px; border: 1px solid var(--line); border-radius: 7px; display: block; }
+.d.over .foot { outline: 2px dashed var(--accent); outline-offset: -4px; }
 `;
 
 /**
@@ -232,6 +245,61 @@ function md(src) {
   return out;
 }
 
+/**
+ * A pasted image, ready to send.
+ *
+ * Scaled to 1568px on the long edge, because the model scales anything bigger
+ * down to that itself: past this point the extra pixels only cost upload time
+ * and tokens. A retina screenshot of a whole display is around 3600px, so this
+ * is most of the weight gone for nothing you can see.
+ *
+ * PNG, since the whole point is screenshots and JPEG softens small text. A
+ * photograph can come out larger as PNG than it went in, so anything still
+ * over the budget is re-encoded as JPEG rather than refused.
+ */
+const MAX_EDGE = 1568;
+const SHOT_BUDGET = 1_800_000; // characters of data URL
+
+const dataUrl = (blob) =>
+  new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result));
+    r.onerror = () => rej(new Error("couldn't read that image"));
+    r.readAsDataURL(blob);
+  });
+
+const loadImage = (url) =>
+  new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => rej(new Error("that doesn't decode as an image"));
+    img.src = url;
+  });
+
+const split = (url) => ({
+  media_type: url.slice(5, url.indexOf(";")),
+  data: url.slice(url.indexOf(",") + 1),
+  url,
+});
+
+async function shrink(blob) {
+  const TAKES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+  const original = await dataUrl(blob);
+  const img = await loadImage(original);
+  const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+  // Small enough and already a type the model reads: send the bytes as they
+  // are. Re-encoding would only lose an animated GIF its animation.
+  if (scale === 1 && original.length <= SHOT_BUDGET && TAKES.has(blob.type)) return split(original);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+  let out = canvas.toDataURL("image/png");
+  if (out.length > SHOT_BUDGET) out = canvas.toDataURL("image/jpeg", 0.85);
+  return split(out);
+}
+
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -261,12 +329,13 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
   const body = el("div", "body");
   const foot = el("div", "foot");
   const input = el("textarea");
-  input.placeholder = "Ask about this task. Enter to send, Shift+Enter for a new line.";
+  input.placeholder = "Ask about this task. Paste a screenshot to show it one. Enter to send, Shift+Enter for a new line.";
+  const tray = el("div", "tray");
   const send = el("button", "primary", "Send");
   const stop = el("button", null, "Stop");
   const bar = el("div", "bar");
   bar.append(send, stop);
-  foot.append(input, bar);
+  foot.append(tray, input, bar);
   d.append(head, body, foot);
   root.append(d);
   mount.append(host);
@@ -631,6 +700,9 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     typingRaw = "";
     state = {};
     body.replaceChildren();
+    // An image pasted for one task is not an image for the next one.
+    shots = [];
+    drawTray();
     root.querySelector(".bindrow")?.remove();
     stream?.close();
     stream = null;
@@ -682,16 +754,108 @@ export function mountDrawer({ bridge = "http://127.0.0.1:4710", token, task, mou
     if (!said.length) body.append(el("div", "empty", "Nothing yet for this task."));
   }
 
+  /**
+   * Images waiting to go with the next message.
+   *
+   * Half of what there is to say about a bug is on screen, and describing a
+   * screenshot in words to an agent that could simply look at it is wasted
+   * effort. They are sent with the message and kept nowhere: the bridge holds
+   * no copy, so a replayed transcript says an image came, not which.
+   */
+  let shots = [];
+  const MOST_SHOTS = 8;
+
+  function drawTray() {
+    tray.replaceChildren();
+    shots.forEach((shot, i) => {
+      const box = el("div", "shot");
+      const thumb = el("img");
+      thumb.src = shot.url;
+      thumb.alt = "pasted image";
+      const x = el("button", "x", "×");
+      x.title = "Remove";
+      x.onclick = () => {
+        shots.splice(i, 1);
+        drawTray();
+      };
+      box.append(thumb, x);
+      tray.append(box);
+    });
+  }
+
+  /** Take whatever images are in a paste or a drop. */
+  async function take(files) {
+    const images = [...files].filter((f) => f && f.type.startsWith("image/"));
+    if (!images.length) return false;
+    for (const file of images) {
+      if (shots.length >= MOST_SHOTS) {
+        row("note", `Only ${MOST_SHOTS} images at a time; the rest were left out.`);
+        break;
+      }
+      try {
+        shots.push(await shrink(file));
+      } catch (e) {
+        row("err", e.message);
+      }
+    }
+    drawTray();
+    input.focus();
+    return true;
+  }
+
+  input.onpaste = (e) => {
+    // Only when the clipboard has no words of its own. Copying part of a web
+    // page puts both text and a picture of it on the clipboard, and swallowing
+    // that paste would lose the text you were actually pasting.
+    if ([...(e.clipboardData?.types ?? [])].includes("text/plain")) return;
+    const files = [...(e.clipboardData?.items ?? [])].filter((i) => i.kind === "file").map((i) => i.getAsFile());
+    if (!files.length) return;
+    e.preventDefault();
+    take(files);
+  };
+
+  // Dropping a file onto a page normally makes the browser open it, which
+  // throws the whole app away, so this has to be handled whether or not it
+  // turns out to be an image.
+  const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+  d.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    d.classList.add("over");
+  });
+  d.addEventListener("dragleave", (e) => {
+    if (e.target === d) d.classList.remove("over");
+  });
+  d.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    d.classList.remove("over");
+    take(e.dataTransfer.files);
+  });
+
   send.onclick = async () => {
     const text = input.value.trim();
-    if (!text || !current) return;
+    if ((!text && !shots.length) || !current) return;
     body.querySelector(".empty")?.remove();
-    row("you", text);
+    const sending = shots;
+    shots = [];
+    drawTray();
+    const mine = row("you", text || (sending.length === 1 ? "(image)" : `(${sending.length} images)`));
+    if (sending.length) {
+      const strip = el("div", "shots");
+      for (const shot of sending) {
+        const thumb = el("img");
+        thumb.src = shot.url;
+        thumb.alt = "pasted image";
+        strip.append(thumb);
+      }
+      mine.prepend(strip);
+    }
     input.value = "";
     try {
       // A message sent mid-turn stops that turn and takes its place. Waiting
       // for work you are trying to prevent is the one thing it must not do.
-      await post("/message", { text, interrupt: true });
+      await post("/message", { text, interrupt: true, images: sending.map(({ media_type, data }) => ({ media_type, data })) });
     } catch (e) {
       row("err", e.message);
     }

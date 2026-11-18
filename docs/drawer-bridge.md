@@ -225,7 +225,7 @@ next piece.
 | `POST /context` | `{ task, title, description }` what the task says |
 | `POST /pick` | open a folder picker on the Mac, return the path |
 | `POST /allow` | `{ workdir }` add a folder to the drawer's own fence |
-| `POST /message` | `{ task, text, interrupt }` run a turn |
+| `POST /message` | `{ task, text, interrupt, images }` run a turn |
 | `POST /approve` | `{ task, id, allow }` answer an approval |
 | `POST /reset` | `{ task }` forget the session, keep the folder |
 | `POST /stop` | `{ task }` abort the running turn |
@@ -253,6 +253,31 @@ the interrupt in about a second.
 
 The Stop button is still there for stopping without saying anything, and is
 enabled only while a turn is running.
+
+### Pasting a screenshot
+
+Paste an image into the box, or drop one on the drawer. It appears as a
+thumbnail above the input and goes with your next message. Half of what there
+is to say about a bug is already on screen, and describing it in words to an
+agent that could simply look at it is wasted effort.
+
+The drawer scales each image to 1568px on its long edge before sending, because
+the model scales anything larger down to that itself: past that point the extra
+pixels cost upload time and tokens and show you nothing. Screenshots are
+re-encoded as PNG, since JPEG softens small text; anything still over about
+1.8MB falls back to JPEG rather than being refused.
+
+A paste is only taken as an image when the clipboard has no text of its own.
+Copying part of a web page puts both text and a picture of it on the clipboard,
+and swallowing that paste would lose the text you meant to paste.
+
+On the wire they are `images: [{ media_type, data }]`, base64, PNG/JPEG/GIF/WebP
+only, at most 8 per message and 4MB each decoded. They ride on the same user
+message as content blocks, ahead of the words. Nothing is written to disk, so
+no image has to clear the folder fence to be looked at, and nothing is kept: the
+scrollback is text, so a replayed transcript says an image came with a message,
+not which one. A message with an image and no words is a real message ("look at
+this"), so the bridge supplies the words.
 
 ## What it does differently from the webhook listener
 
